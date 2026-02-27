@@ -1,0 +1,19 @@
+[project]
+name = "sago-project"
+version = "0.1.0"
+
+[connections.postgres]
+type = "postgres"
+url = "postgres://user:password@localhost/db"
+
+[connections.s3]
+type = "s3"
+bucket = "my-data-bucket"
+region = "us-east-1"
+
+[schema]
+provider = "postgres"
+tables = ["users", "orders"]
+
+[checks]
+drift_threshold = 0.05

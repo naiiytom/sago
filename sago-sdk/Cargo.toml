@@ -1,0 +1,11 @@
+[package]
+name = "sago-sdk"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+sago-core = { path = "../sago-core" }
+sago-proto = { path = "../sago-proto" }
+async-trait.workspace = true
+arrow.workspace = true
+tokio.workspace = true

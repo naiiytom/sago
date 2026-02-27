@@ -1,0 +1,16 @@
+[package]
+name = "sago-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+arrow.workspace = true
+async-trait.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+serde.workspace = true
+toml.workspace = true
+tokio.workspace = true
+sqlx.workspace = true
+aws-sdk-s3.workspace = true
