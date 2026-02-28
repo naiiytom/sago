@@ -8,10 +8,10 @@
 - [x] Arrow integration
 
 ## Phase 2: Core Functionality
-- [ ] Implement `SchemaProvider` for PostgreSQL
-- [ ] Implement `SchemaProvider` for Parquet on S3
-- [ ] Basic Schema Drift Detection (column additions/removals)
-- [ ] Data Value Drift Detection (simple statistical metrics)
+- [x] Implement `SchemaProvider` for PostgreSQL
+- [x] Implement `SchemaProvider` for Parquet on S3
+- [x] Basic Schema Drift Detection (column additions/removals)
+- [x] Data Value Drift Detection (simple statistical metrics)
 
 ## Phase 3: Advanced Features
 - [ ] **Cross-Modal Diffing**: Efficiently compare tables in Postgres vs. Parquet files in S3.

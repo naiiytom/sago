@@ -1,4 +1,5 @@
 use arrow::datatypes::Schema;
+use arrow::record_batch::RecordBatch;
 use async_trait::async_trait;
 use thiserror::Error;
 
@@ -25,6 +26,7 @@ pub enum SagoError {
 
 pub mod config;
 pub mod postgres;
+pub mod s3;
 pub mod drift;
 
 pub type Result<T> = std::result::Result<T, SagoError>;
@@ -36,11 +38,18 @@ pub trait SchemaProvider: Send + Sync {
     async fn get_schema(&self, identifier: &str) -> Result<Schema>;
 }
 
+/// The DataProvider trait defines the interface for fetching data from data sources.
+#[async_trait]
+pub trait DataProvider: SchemaProvider {
+    /// Retrieves the data as a collection of Arrow RecordBatches.
+    async fn get_data(&self, identifier: &str) -> Result<Vec<RecordBatch>>;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use arrow::datatypes::{Field, DataType};
-    use std::sync::Arc;
+    
 
     struct MockSchemaProvider;
 

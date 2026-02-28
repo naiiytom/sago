@@ -1,10 +1,13 @@
 [package]
 name = "sago-core"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 
 [dependencies]
 arrow.workspace = true
+parquet.workspace = true
+object_store.workspace = true
+bytes.workspace = true
 async-trait.workspace = true
 thiserror.workspace = true
 anyhow.workspace = true
