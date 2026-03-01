@@ -81,9 +81,16 @@ impl DataProvider for PostgresSchemaProvider {
     async fn get_data(&self, identifier: &str) -> Result<Vec<RecordBatch>> {
         let schema = self.get_schema(identifier).await?;
         
-        // Use a simple SELECT * query. 
-        // Note: For production, we should probably handle schema-qualified names carefully.
-        let query = format!("SELECT * FROM {}", identifier);
+        // Securely quote identifiers to prevent SQL injection while supporting multi-part names
+        let quoted_identifier = identifier
+            .split('.')
+            .map(|part| part.replace('"', "\"\""))
+            .map(|part| format!("\"{}\"", part))
+            .collect::<Vec<_>>()
+            .join(".");
+
+        let query = format!("SELECT * FROM {}", quoted_identifier);
+
         let rows = sqlx::query(&query)
             .fetch_all(&self.pool)
             .await

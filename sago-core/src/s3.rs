@@ -29,8 +29,8 @@ impl SchemaProvider for S3SchemaProvider {
     async fn get_schema(&self, identifier: &str) -> Result<Schema> {
         let path = Path::from(identifier);
         
-        let result = self.store.get(&path).await.map_err(|e| SagoError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
-        let bytes: Bytes = result.bytes().await.map_err(|e| SagoError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+        let result = self.store.get(&path).await.map_err(|e| SagoError::Io(std::io::Error::other(e)))?;
+        let bytes: Bytes = result.bytes().await.map_err(|e| SagoError::Io(std::io::Error::other(e)))?;
         
         let builder = ParquetRecordBatchReaderBuilder::try_new(bytes)
             .map_err(|e| SagoError::Schema(format!("Failed to parse parquet schema: {}", e)))?;
@@ -44,8 +44,8 @@ impl DataProvider for S3SchemaProvider {
     async fn get_data(&self, identifier: &str) -> Result<Vec<RecordBatch>> {
         let path = Path::from(identifier);
         
-        let result = self.store.get(&path).await.map_err(|e| SagoError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
-        let bytes: Bytes = result.bytes().await.map_err(|e| SagoError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+        let result = self.store.get(&path).await.map_err(|e| SagoError::Io(std::io::Error::other(e)))?;
+        let bytes: Bytes = result.bytes().await.map_err(|e| SagoError::Io(std::io::Error::other(e)))?;
         
         let builder = ParquetRecordBatchReaderBuilder::try_new(bytes)
             .map_err(|e| SagoError::Schema(format!("Failed to parse parquet schema: {}", e)))?;
@@ -55,7 +55,7 @@ impl DataProvider for S3SchemaProvider {
         
         let mut batches = Vec::new();
         for batch_result in reader {
-            let batch = batch_result.map_err(|e| SagoError::Arrow(e.into()))?;
+            let batch = batch_result.map_err(SagoError::Arrow)?;
             batches.push(batch);
         }
         
