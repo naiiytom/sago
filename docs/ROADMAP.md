@@ -14,9 +14,9 @@
 - [x] Data Value Drift Detection (simple statistical metrics)
 
 ## Phase 3: Advanced Features
-- [ ] **Cross-Modal Diffing**: Efficiently compare tables in Postgres vs. Parquet files in S3.
-- [ ] **Semantic Schema Analysis**: Infer semantic meaning of columns (e.g., "email", "credit_card") to detect drifts beyond type changes.
-- [ ] **Statistical Drift Detection**: Use advanced algorithms (KS-test, etc.) to detect distribution shifts.
+- [x] **Cross-Modal Diffing**: Efficiently compare tables in Postgres vs. Parquet files in S3.
+- [x] **Semantic Schema Analysis**: Infer semantic meaning of columns (e.g., "email", "credit_card") to detect drifts beyond type changes.
+- [x] **Statistical Drift Detection**: Use advanced algorithms (KS-test, etc.) to detect distribution shifts.
 
 ## Phase 4: Future Directions
 - [ ] **Semantic Smart Renaming**: Intelligently handle column renames without breaking pipelines.

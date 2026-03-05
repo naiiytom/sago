@@ -17,3 +17,5 @@ toml.workspace = true
 tokio.workspace = true
 sqlx.workspace = true
 aws-sdk-s3.workspace = true
+regex = "1.12.3"
+lazy_static = "1.5.0"
