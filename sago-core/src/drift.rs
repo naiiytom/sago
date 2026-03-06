@@ -3,12 +3,21 @@ use arrow::datatypes::{DataType, Schema};
 use arrow::record_batch::RecordBatch;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
+use crate::semantic::{infer_semantic_type, SemanticType};
 
 #[derive(Debug, Serialize, PartialEq)]
 pub struct SchemaDrift {
     pub added_fields: Vec<String>,
     pub removed_fields: Vec<String>,
     pub changed_types: Vec<TypeChange>,
+    pub semantic_drifts: Vec<SemanticDrift>,
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+pub struct SemanticDrift {
+    pub field_name: String,
+    pub source_type: SemanticType,
+    pub target_type: SemanticType,
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -38,6 +47,8 @@ pub struct ColumnDrift {
     pub target_stats: ColumnStats,
     pub mean_drift: Option<f64>,
     pub null_count_drift: i64,
+    pub ks_statistic: Option<f64>,
+    pub ks_p_value: Option<f64>,
 }
 
 pub fn detect_schema_drift(source: &Schema, target: &Schema) -> SchemaDrift {
@@ -66,7 +77,40 @@ pub fn detect_schema_drift(source: &Schema, target: &Schema) -> SchemaDrift {
         added_fields,
         removed_fields,
         changed_types,
+        semantic_drifts: Vec::new(),
     }
+}
+
+pub fn detect_semantic_drift(source_batches: &[RecordBatch], target_batches: &[RecordBatch]) -> Vec<SemanticDrift> {
+    let mut semantic_drifts = Vec::new();
+
+    if source_batches.is_empty() || target_batches.is_empty() {
+        return semantic_drifts;
+    }
+
+    let source_schema = source_batches[0].schema();
+    let target_schema = target_batches[0].schema();
+
+    let source_fields: HashSet<_> = source_schema.fields().iter().map(|f| f.name().clone()).collect();
+    let target_fields: HashSet<_> = target_schema.fields().iter().map(|f| f.name().clone()).collect();
+
+    for field_name in source_fields.intersection(&target_fields) {
+        let source_col = source_batches[0].column_by_name(field_name).unwrap();
+        let target_col = target_batches[0].column_by_name(field_name).unwrap();
+
+        let source_semantic = infer_semantic_type(field_name, source_col.as_ref());
+        let target_semantic = infer_semantic_type(field_name, target_col.as_ref());
+
+        if source_semantic != target_semantic {
+            semantic_drifts.push(SemanticDrift {
+                field_name: field_name.clone(),
+                source_type: source_semantic,
+                target_type: target_semantic,
+            });
+        }
+    }
+
+    semantic_drifts
 }
 
 pub fn calculate_column_stats(batches: &[RecordBatch], column_name: &str) -> Option<ColumnStats> {
@@ -145,21 +189,126 @@ pub fn detect_data_drift(source_batches: &[RecordBatch], target_batches: &[Recor
 
         let null_count_drift = target_stats.null_count as i64 - source_stats.null_count as i64;
 
+        let (ks_statistic, ks_p_value) = calculate_ks_test(source_batches, target_batches, field_name);
+
         column_drifts.insert(field_name.clone(), ColumnDrift {
             source_stats,
             target_stats,
             mean_drift,
             null_count_drift,
+            ks_statistic,
+            ks_p_value,
         });
     }
 
     DataDrift { column_drifts }
 }
 
+fn extract_numeric_values(batches: &[RecordBatch], column_name: &str) -> Vec<f64> {
+    let mut values = Vec::new();
+    for batch in batches {
+        if let Some(column) = batch.column_by_name(column_name) {
+            match column.data_type() {
+                DataType::Int16 => {
+                    let arr = column.as_any().downcast_ref::<Int16Array>().unwrap();
+                    for i in 0..arr.len() {
+                        if !arr.is_null(i) { values.push(arr.value(i) as f64); }
+                    }
+                }
+                DataType::Int32 => {
+                    let arr = column.as_any().downcast_ref::<Int32Array>().unwrap();
+                    for i in 0..arr.len() {
+                        if !arr.is_null(i) { values.push(arr.value(i) as f64); }
+                    }
+                }
+                DataType::Int64 => {
+                    let arr = column.as_any().downcast_ref::<Int64Array>().unwrap();
+                    for i in 0..arr.len() {
+                        if !arr.is_null(i) { values.push(arr.value(i) as f64); }
+                    }
+                }
+                DataType::Float32 => {
+                    let arr = column.as_any().downcast_ref::<Float32Array>().unwrap();
+                    for i in 0..arr.len() {
+                        if !arr.is_null(i) { values.push(arr.value(i) as f64); }
+                    }
+                }
+                DataType::Float64 => {
+                    let arr = column.as_any().downcast_ref::<Float64Array>().unwrap();
+                    for i in 0..arr.len() {
+                        if !arr.is_null(i) { values.push(arr.value(i)); }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    values
+}
+
+fn calculate_ks_test(source_batches: &[RecordBatch], target_batches: &[RecordBatch], column_name: &str) -> (Option<f64>, Option<f64>) {
+    let mut source_vals = extract_numeric_values(source_batches, column_name);
+    let mut target_vals = extract_numeric_values(target_batches, column_name);
+
+    if source_vals.is_empty() || target_vals.is_empty() {
+        return (None, None);
+    }
+
+    // Sort the arrays to compute the Empirical CDF
+    source_vals.sort_by(|a, b| a.total_cmp(b));
+    target_vals.sort_by(|a, b| a.total_cmp(b));
+
+    let n1 = source_vals.len() as f64;
+    let n2 = target_vals.len() as f64;
+
+    let mut max_dist = 0.0;
+    let mut i = 0;
+    let mut j = 0;
+
+    while i < source_vals.len() && j < target_vals.len() {
+        let val1 = source_vals[i];
+        let val2 = target_vals[j];
+
+        if val1 <= val2 {
+            i += 1;
+        }
+        if val2 <= val1 {
+            j += 1;
+        }
+
+        let cdf1 = i as f64 / n1;
+        let cdf2 = j as f64 / n2;
+        let dist = (cdf1 - cdf2).abs();
+
+        if dist > max_dist {
+            max_dist = dist;
+        }
+    }
+
+    // Very basic KS p-value approximation for 2-sample test
+    let en = (n1 * n2) / (n1 + n2);
+    let lambda = (en.sqrt() + 0.12 + 0.11 / en.sqrt()) * max_dist;
+
+    // Using asymptotic formula for Kolmogorov distribution
+    let mut p_value = 0.0;
+    if lambda > 0.0 {
+        let mut sum = 0.0;
+        for k in 1..=100 {
+            let sign = if k % 2 == 0 { -1.0 } else { 1.0 };
+            sum += sign * (-2.0 * (k as f64 * lambda).powi(2)).exp();
+        }
+        p_value = 2.0 * sum;
+        if p_value < 0.0 { p_value = 0.0; }
+        if p_value > 1.0 { p_value = 1.0; }
+    }
+
+    (Some(max_dist), Some(p_value))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow::array::{Int32Array, StringArray};
+    use arrow::array::Int32Array;
     use arrow::datatypes::{DataType, Field};
     use std::sync::Arc;
 
@@ -208,5 +357,7 @@ mod tests {
         assert_eq!(val_drift.target_stats.mean, Some(15.0));
         assert_eq!(val_drift.mean_drift, Some(13.0));
         assert_eq!(val_drift.null_count_drift, 1);
+        assert!(val_drift.ks_statistic.is_some());
+        assert!(val_drift.ks_p_value.is_some());
     }
 }

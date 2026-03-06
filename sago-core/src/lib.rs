@@ -28,6 +28,8 @@ pub mod config;
 pub mod postgres;
 pub mod s3;
 pub mod drift;
+pub mod semantic;
+pub mod diff;
 
 pub type Result<T> = std::result::Result<T, SagoError>;
 
