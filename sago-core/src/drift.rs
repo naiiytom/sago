@@ -308,9 +308,28 @@ fn calculate_ks_test(source_batches: &[RecordBatch], target_batches: &[RecordBat
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow::array::Int32Array;
+    use arrow::array::{Float64Array, Int32Array, StringArray};
     use arrow::datatypes::{DataType, Field};
     use std::sync::Arc;
+
+    // ── helpers ──────────────────────────────────────────────────────────────
+
+    fn int32_batch(name: &str, values: Vec<Option<i32>>) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![Field::new(name, DataType::Int32, true)]));
+        RecordBatch::try_new(schema, vec![Arc::new(Int32Array::from(values))]).unwrap()
+    }
+
+    fn f64_batch(name: &str, values: Vec<Option<f64>>) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![Field::new(name, DataType::Float64, true)]));
+        RecordBatch::try_new(schema, vec![Arc::new(Float64Array::from(values))]).unwrap()
+    }
+
+    fn str_batch(name: &str, values: Vec<Option<&str>>) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![Field::new(name, DataType::Utf8, true)]));
+        RecordBatch::try_new(schema, vec![Arc::new(StringArray::from(values))]).unwrap()
+    }
+
+    // ── detect_schema_drift ──────────────────────────────────────────────────
 
     #[test]
     fn test_detect_schema_drift() {
@@ -335,6 +354,101 @@ mod tests {
     }
 
     #[test]
+    fn test_detect_schema_drift_no_changes() {
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new("name", DataType::Utf8, true),
+        ]);
+        let drift = detect_schema_drift(&schema, &schema);
+        assert!(drift.added_fields.is_empty());
+        assert!(drift.removed_fields.is_empty());
+        assert!(drift.changed_types.is_empty());
+    }
+
+    #[test]
+    fn test_detect_schema_drift_empty_schemas() {
+        let empty = Schema::new(vec![] as Vec<Field>);
+        let drift = detect_schema_drift(&empty, &empty);
+        assert!(drift.added_fields.is_empty());
+        assert!(drift.removed_fields.is_empty());
+        assert!(drift.changed_types.is_empty());
+    }
+
+    // ── calculate_column_stats ───────────────────────────────────────────────
+
+    #[test]
+    fn test_column_stats_int32() {
+        let batch = int32_batch("val", vec![Some(1), Some(2), Some(3)]);
+        let stats = calculate_column_stats(&[batch], "val").unwrap();
+        assert_eq!(stats.row_count, 3);
+        assert_eq!(stats.null_count, 0);
+        assert_eq!(stats.mean, Some(2.0));
+        assert_eq!(stats.min, Some(1.0));
+        assert_eq!(stats.max, Some(3.0));
+    }
+
+    #[test]
+    fn test_column_stats_float64() {
+        let batch = f64_batch("score", vec![Some(1.5), Some(2.5), Some(3.0)]);
+        let stats = calculate_column_stats(&[batch], "score").unwrap();
+        assert_eq!(stats.row_count, 3);
+        assert_eq!(stats.null_count, 0);
+        assert!((stats.mean.unwrap() - 7.0 / 3.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_column_stats_with_nulls() {
+        let batch = int32_batch("val", vec![Some(10), None, Some(20)]);
+        let stats = calculate_column_stats(&[batch], "val").unwrap();
+        assert_eq!(stats.null_count, 1);
+        assert_eq!(stats.row_count, 3);
+        assert_eq!(stats.mean, Some(15.0)); // (10+20)/2
+        assert_eq!(stats.min, Some(10.0));
+        assert_eq!(stats.max, Some(20.0));
+    }
+
+    #[test]
+    fn test_column_stats_all_nulls() {
+        let batch = int32_batch("val", vec![None, None, None]);
+        let stats = calculate_column_stats(&[batch], "val").unwrap();
+        assert_eq!(stats.null_count, 3);
+        assert_eq!(stats.row_count, 3);
+        assert_eq!(stats.mean, None);
+        assert_eq!(stats.min, None);
+        assert_eq!(stats.max, None);
+    }
+
+    #[test]
+    fn test_column_stats_non_numeric() {
+        let batch = str_batch("name", vec![Some("alice"), Some("bob")]);
+        let stats = calculate_column_stats(&[batch], "name").unwrap();
+        assert_eq!(stats.row_count, 2);
+        assert_eq!(stats.null_count, 0);
+        assert_eq!(stats.mean, None);
+        assert_eq!(stats.min, None);
+        assert_eq!(stats.max, None);
+    }
+
+    #[test]
+    fn test_column_stats_empty_batches() {
+        let result = calculate_column_stats(&[], "val");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_column_stats_multiple_batches() {
+        let b1 = int32_batch("val", vec![Some(1), Some(2)]);
+        let b2 = int32_batch("val", vec![Some(3), Some(4)]);
+        let stats = calculate_column_stats(&[b1, b2], "val").unwrap();
+        assert_eq!(stats.row_count, 4);
+        assert_eq!(stats.mean, Some(2.5));
+        assert_eq!(stats.min, Some(1.0));
+        assert_eq!(stats.max, Some(4.0));
+    }
+
+    // ── detect_data_drift ────────────────────────────────────────────────────
+
+    #[test]
     fn test_detect_data_drift() {
         let schema = Arc::new(Schema::new(vec![
             Field::new("val", DataType::Int32, true),
@@ -351,7 +465,7 @@ mod tests {
         ).unwrap();
 
         let drift = detect_data_drift(&[source_batch], &[target_batch]);
-        
+
         let val_drift = drift.column_drifts.get("val").unwrap();
         assert_eq!(val_drift.source_stats.mean, Some(2.0));
         assert_eq!(val_drift.target_stats.mean, Some(15.0));
@@ -359,5 +473,80 @@ mod tests {
         assert_eq!(val_drift.null_count_drift, 1);
         assert!(val_drift.ks_statistic.is_some());
         assert!(val_drift.ks_p_value.is_some());
+    }
+
+    #[test]
+    fn test_detect_data_drift_empty_batches() {
+        let drift = detect_data_drift(&[], &[]);
+        assert!(drift.column_drifts.is_empty());
+    }
+
+    // ── KS test (via detect_data_drift) ──────────────────────────────────────
+
+    #[test]
+    fn test_ks_identical_distributions() {
+        let b1 = int32_batch("val", vec![Some(1), Some(2), Some(3), Some(4)]);
+        let b2 = int32_batch("val", vec![Some(1), Some(2), Some(3), Some(4)]);
+        let drift = detect_data_drift(&[b1], &[b2]);
+        let col = drift.column_drifts.get("val").unwrap();
+        assert_eq!(col.ks_statistic, Some(0.0));
+    }
+
+    #[test]
+    fn test_ks_disjoint_distributions() {
+        let b1 = int32_batch("val", vec![Some(1), Some(2), Some(3)]);
+        let b2 = int32_batch("val", vec![Some(100), Some(200), Some(300)]);
+        let drift = detect_data_drift(&[b1], &[b2]);
+        let col = drift.column_drifts.get("val").unwrap();
+        assert_eq!(col.ks_statistic, Some(1.0));
+    }
+
+    #[test]
+    fn test_ks_non_numeric_column() {
+        let b1 = str_batch("name", vec![Some("a"), Some("b")]);
+        let b2 = str_batch("name", vec![Some("c"), Some("d")]);
+        let drift = detect_data_drift(&[b1], &[b2]);
+        let col = drift.column_drifts.get("name").unwrap();
+        assert_eq!(col.ks_statistic, None);
+        assert_eq!(col.ks_p_value, None);
+        assert_eq!(col.mean_drift, None);
+    }
+
+    // ── detect_semantic_drift ────────────────────────────────────────────────
+
+    #[test]
+    fn test_detect_semantic_drift_empty_batches() {
+        let result = detect_semantic_drift(&[], &[]);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_detect_semantic_drift_none() {
+        // Same email data in both — no drift expected
+        let b1 = str_batch("email", vec![Some("a@example.com"), Some("b@example.com")]);
+        let b2 = str_batch("email", vec![Some("c@example.com"), Some("d@example.com")]);
+        let result = detect_semantic_drift(&[b1], &[b2]);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_detect_semantic_drift_detected() {
+        // Source: column named "contact" with email data → Email
+        // Target: same column name but with plain strings → Unknown
+        let source = str_batch(
+            "contact",
+            vec![Some("a@x.com"), Some("b@x.com"), Some("c@x.com"),
+                 Some("d@x.com"), Some("e@x.com")],
+        );
+        let target = str_batch(
+            "contact",
+            vec![Some("not-an-email"), Some("also-not"), Some("nope"),
+                 Some("random"), Some("text")],
+        );
+        let result = detect_semantic_drift(&[source], &[target]);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].field_name, "contact");
+        assert_eq!(result[0].source_type, SemanticType::Email);
+        assert_eq!(result[0].target_type, SemanticType::Unknown);
     }
 }

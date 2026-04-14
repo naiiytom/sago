@@ -15,7 +15,7 @@ impl PostgresSchemaProvider {
         Self { pool }
     }
 
-    fn map_postgres_type(data_type: &str) -> DataType {
+    pub(crate) fn map_postgres_type(data_type: &str) -> DataType {
         match data_type {
             "boolean" => DataType::Boolean,
             "smallint" | "int2" => DataType::Int16,
@@ -160,5 +160,69 @@ impl DataProvider for PostgresSchemaProvider {
         let batch = RecordBatch::try_new(Arc::new(schema), columns)?;
         
         Ok(vec![batch])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_map_postgres_type_integers() {
+        assert_eq!(PostgresSchemaProvider::map_postgres_type("smallint"), DataType::Int16);
+        assert_eq!(PostgresSchemaProvider::map_postgres_type("int2"), DataType::Int16);
+        assert_eq!(PostgresSchemaProvider::map_postgres_type("integer"), DataType::Int32);
+        assert_eq!(PostgresSchemaProvider::map_postgres_type("int4"), DataType::Int32);
+        assert_eq!(PostgresSchemaProvider::map_postgres_type("serial"), DataType::Int32);
+        assert_eq!(PostgresSchemaProvider::map_postgres_type("bigint"), DataType::Int64);
+        assert_eq!(PostgresSchemaProvider::map_postgres_type("int8"), DataType::Int64);
+        assert_eq!(PostgresSchemaProvider::map_postgres_type("bigserial"), DataType::Int64);
+    }
+
+    #[test]
+    fn test_map_postgres_type_floats() {
+        assert_eq!(PostgresSchemaProvider::map_postgres_type("real"), DataType::Float32);
+        assert_eq!(PostgresSchemaProvider::map_postgres_type("float4"), DataType::Float32);
+        assert_eq!(PostgresSchemaProvider::map_postgres_type("double precision"), DataType::Float64);
+        assert_eq!(PostgresSchemaProvider::map_postgres_type("float8"), DataType::Float64);
+        assert_eq!(PostgresSchemaProvider::map_postgres_type("numeric"), DataType::Float64);
+        assert_eq!(PostgresSchemaProvider::map_postgres_type("decimal"), DataType::Float64);
+    }
+
+    #[test]
+    fn test_map_postgres_type_strings() {
+        assert_eq!(PostgresSchemaProvider::map_postgres_type("character varying"), DataType::Utf8);
+        assert_eq!(PostgresSchemaProvider::map_postgres_type("varchar"), DataType::Utf8);
+        assert_eq!(PostgresSchemaProvider::map_postgres_type("text"), DataType::Utf8);
+        assert_eq!(PostgresSchemaProvider::map_postgres_type("character"), DataType::Utf8);
+        assert_eq!(PostgresSchemaProvider::map_postgres_type("char"), DataType::Utf8);
+        assert_eq!(PostgresSchemaProvider::map_postgres_type("json"), DataType::Utf8);
+        assert_eq!(PostgresSchemaProvider::map_postgres_type("jsonb"), DataType::Utf8);
+    }
+
+    #[test]
+    fn test_map_postgres_type_other() {
+        assert_eq!(PostgresSchemaProvider::map_postgres_type("boolean"), DataType::Boolean);
+        assert_eq!(PostgresSchemaProvider::map_postgres_type("bytea"), DataType::Binary);
+        assert_eq!(PostgresSchemaProvider::map_postgres_type("date"), DataType::Date32);
+        assert!(matches!(
+            PostgresSchemaProvider::map_postgres_type("timestamp"),
+            DataType::Timestamp(_, _)
+        ));
+        assert!(matches!(
+            PostgresSchemaProvider::map_postgres_type("timestamp without time zone"),
+            DataType::Timestamp(_, _)
+        ));
+        assert!(matches!(
+            PostgresSchemaProvider::map_postgres_type("timestamp with time zone"),
+            DataType::Timestamp(_, Some(_))
+        ));
+    }
+
+    #[test]
+    fn test_map_postgres_type_unknown_falls_back_to_utf8() {
+        assert_eq!(PostgresSchemaProvider::map_postgres_type("uuid"), DataType::Utf8);
+        assert_eq!(PostgresSchemaProvider::map_postgres_type("interval"), DataType::Utf8);
+        assert_eq!(PostgresSchemaProvider::map_postgres_type("some_custom_type"), DataType::Utf8);
     }
 }

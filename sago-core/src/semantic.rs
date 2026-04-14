@@ -98,7 +98,9 @@ pub fn infer_semantic_type(column_name: &str, array: &dyn Array) -> SemanticType
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arrow::array::Int32Array;
 
+    // ── name-based inference ─────────────────────────────────────────────────
 
     #[test]
     fn test_infer_by_name() {
@@ -111,9 +113,126 @@ mod tests {
         assert_eq!(infer_semantic_type("website_url", &array), SemanticType::Url);
     }
 
+    // ── data-based inference — each semantic type ────────────────────────────
+
     #[test]
     fn test_infer_by_data_email() {
-        let array = StringArray::from(vec![Some("test@example.com"), Some("user@domain.org"), None, Some("another@email.net")]);
+        let array = StringArray::from(vec![
+            Some("test@example.com"), Some("user@domain.org"), None, Some("another@email.net"),
+        ]);
         assert_eq!(infer_semantic_type("unknown_col", &array), SemanticType::Email);
+    }
+
+    #[test]
+    fn test_infer_by_data_credit_card() {
+        // Visa test numbers
+        let array = StringArray::from(vec![
+            Some("4111111111111111"),
+            Some("4012888888881881"),
+            Some("4222222222222"),
+            Some("4111111111111111"),
+            Some("4012888888881881"),
+        ]);
+        assert_eq!(infer_semantic_type("unknown_col", &array), SemanticType::CreditCard);
+    }
+
+    #[test]
+    fn test_infer_by_data_phone() {
+        let array = StringArray::from(vec![
+            Some("+14155552671"),
+            Some("+442071234567"),
+            Some("+33123456789"),
+            Some("+14155552672"),
+            Some("+14155552673"),
+        ]);
+        assert_eq!(infer_semantic_type("unknown_col", &array), SemanticType::PhoneNumber);
+    }
+
+    #[test]
+    fn test_infer_by_data_uuid() {
+        let array = StringArray::from(vec![
+            Some("550e8400-e29b-41d4-a716-446655440000"),
+            Some("6ba7b810-9dad-11d1-80b4-00c04fd430c8"),
+            Some("6ba7b811-9dad-11d1-80b4-00c04fd430c8"),
+            Some("6ba7b812-9dad-11d1-80b4-00c04fd430c8"),
+            Some("6ba7b813-9dad-11d1-80b4-00c04fd430c8"),
+        ]);
+        assert_eq!(infer_semantic_type("unknown_col", &array), SemanticType::UUID);
+    }
+
+    #[test]
+    fn test_infer_by_data_ip() {
+        let array = StringArray::from(vec![
+            Some("192.168.1.1"),
+            Some("10.0.0.1"),
+            Some("172.16.0.1"),
+            Some("8.8.8.8"),
+            Some("1.1.1.1"),
+        ]);
+        assert_eq!(infer_semantic_type("unknown_col", &array), SemanticType::IPAddress);
+    }
+
+    #[test]
+    fn test_infer_by_data_url() {
+        let array = StringArray::from(vec![
+            Some("https://example.com"),
+            Some("http://foo.org/path?q=1"),
+            Some("https://bar.io"),
+            Some("https://baz.net/page"),
+            Some("http://qux.com"),
+        ]);
+        assert_eq!(infer_semantic_type("unknown_col", &array), SemanticType::Url);
+    }
+
+    // ── threshold boundary behaviour ─────────────────────────────────────────
+
+    #[test]
+    fn test_threshold_below_80_percent() {
+        // 6 emails out of 10 = 60% — below the 80% threshold
+        let array = StringArray::from(vec![
+            Some("a@example.com"),
+            Some("b@example.com"),
+            Some("c@example.com"),
+            Some("d@example.com"),
+            Some("e@example.com"),
+            Some("f@example.com"),
+            Some("not-an-email"),
+            Some("not-an-email"),
+            Some("not-an-email"),
+            Some("not-an-email"),
+        ]);
+        assert_eq!(infer_semantic_type("unknown_col", &array), SemanticType::Unknown);
+    }
+
+    #[test]
+    fn test_threshold_at_80_percent() {
+        // 8 emails out of 10 = exactly 80% — meets the threshold
+        let array = StringArray::from(vec![
+            Some("a@example.com"),
+            Some("b@example.com"),
+            Some("c@example.com"),
+            Some("d@example.com"),
+            Some("e@example.com"),
+            Some("f@example.com"),
+            Some("g@example.com"),
+            Some("h@example.com"),
+            Some("not-an-email"),
+            Some("not-an-email"),
+        ]);
+        assert_eq!(infer_semantic_type("unknown_col", &array), SemanticType::Email);
+    }
+
+    // ── non-Utf8 and all-null arrays ─────────────────────────────────────────
+
+    #[test]
+    fn test_non_utf8_array() {
+        let array = Int32Array::from(vec![1, 2, 3]);
+        assert_eq!(infer_semantic_type("unknown_col", &array), SemanticType::Unknown);
+    }
+
+    #[test]
+    fn test_all_null_array() {
+        let array = StringArray::from(vec![None::<&str>, None, None]);
+        assert_eq!(infer_semantic_type("unknown_col", &array), SemanticType::Unknown);
     }
 }
