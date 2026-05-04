@@ -1,12 +1,12 @@
+use crate::{DataProvider, Result, SagoError, SchemaProvider};
 use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
 use async_trait::async_trait;
-use crate::{Result, SchemaProvider, DataProvider, SagoError};
+use bytes::Bytes;
 use object_store::aws::AmazonS3Builder;
 use object_store::{ObjectStore, path::Path};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use std::sync::Arc;
-use bytes::Bytes;
 
 pub struct S3SchemaProvider {
     store: Arc<dyn ObjectStore>,
@@ -19,8 +19,10 @@ impl S3SchemaProvider {
             .with_region(region)
             .build()
             .map_err(|e| SagoError::Config(format!("Failed to build S3 store: {}", e)))?;
-        
-        Ok(Self { store: Arc::new(store) })
+
+        Ok(Self {
+            store: Arc::new(store),
+        })
     }
 }
 
@@ -28,13 +30,20 @@ impl S3SchemaProvider {
 impl SchemaProvider for S3SchemaProvider {
     async fn get_schema(&self, identifier: &str) -> Result<Schema> {
         let path = Path::from(identifier);
-        
-        let result = self.store.get(&path).await.map_err(|e| SagoError::Io(std::io::Error::other(e)))?;
-        let bytes: Bytes = result.bytes().await.map_err(|e| SagoError::Io(std::io::Error::other(e)))?;
-        
+
+        let result = self
+            .store
+            .get(&path)
+            .await
+            .map_err(|e| SagoError::Io(std::io::Error::other(e)))?;
+        let bytes: Bytes = result
+            .bytes()
+            .await
+            .map_err(|e| SagoError::Io(std::io::Error::other(e)))?;
+
         let builder = ParquetRecordBatchReaderBuilder::try_new(bytes)
             .map_err(|e| SagoError::Schema(format!("Failed to parse parquet schema: {}", e)))?;
-        
+
         Ok(builder.schema().as_ref().clone())
     }
 }
@@ -43,22 +52,30 @@ impl SchemaProvider for S3SchemaProvider {
 impl DataProvider for S3SchemaProvider {
     async fn get_data(&self, identifier: &str) -> Result<Vec<RecordBatch>> {
         let path = Path::from(identifier);
-        
-        let result = self.store.get(&path).await.map_err(|e| SagoError::Io(std::io::Error::other(e)))?;
-        let bytes: Bytes = result.bytes().await.map_err(|e| SagoError::Io(std::io::Error::other(e)))?;
-        
+
+        let result = self
+            .store
+            .get(&path)
+            .await
+            .map_err(|e| SagoError::Io(std::io::Error::other(e)))?;
+        let bytes: Bytes = result
+            .bytes()
+            .await
+            .map_err(|e| SagoError::Io(std::io::Error::other(e)))?;
+
         let builder = ParquetRecordBatchReaderBuilder::try_new(bytes)
             .map_err(|e| SagoError::Schema(format!("Failed to parse parquet schema: {}", e)))?;
-        
-        let reader = builder.build()
+
+        let reader = builder
+            .build()
             .map_err(|e| SagoError::Schema(format!("Failed to build parquet reader: {}", e)))?;
-        
+
         let mut batches = Vec::new();
         for batch_result in reader {
             let batch = batch_result.map_err(SagoError::Arrow)?;
             batches.push(batch);
         }
-        
+
         Ok(batches)
     }
 }

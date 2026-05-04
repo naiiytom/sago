@@ -1,5 +1,8 @@
+use crate::drift::{
+    DataDrift, SchemaDrift, SemanticDrift, detect_data_drift, detect_schema_drift,
+    detect_semantic_drift,
+};
 use crate::{DataProvider, Result};
-use crate::drift::{detect_data_drift, detect_schema_drift, detect_semantic_drift, DataDrift, SchemaDrift, SemanticDrift};
 use serde::Serialize;
 use std::sync::Arc;
 
@@ -41,11 +44,11 @@ pub async fn diff_datasets(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::SagoError;
     use arrow::array::{Array, Int32Array, Int64Array, StringArray};
     use arrow::datatypes::{DataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
     use async_trait::async_trait;
-    use crate::SagoError;
     use std::sync::Arc;
 
     // ── Mock provider ────────────────────────────────────────────────────────
@@ -136,7 +139,7 @@ mod tests {
             Field::new("name", DataType::Utf8, false),
         ]);
         let target_schema = Schema::new(vec![
-            Field::new("id", DataType::Int64, false), // type change
+            Field::new("id", DataType::Int64, false),  // type change
             Field::new("email", DataType::Utf8, true), // added; "name" removed
         ]);
 
@@ -162,8 +165,18 @@ mod tests {
 
         let report = diff_datasets(source, "s", target, "t").await.unwrap();
 
-        assert!(report.schema_drift.added_fields.contains(&"email".to_string()));
-        assert!(report.schema_drift.removed_fields.contains(&"name".to_string()));
+        assert!(
+            report
+                .schema_drift
+                .added_fields
+                .contains(&"email".to_string())
+        );
+        assert!(
+            report
+                .schema_drift
+                .removed_fields
+                .contains(&"name".to_string())
+        );
         assert_eq!(report.schema_drift.changed_types.len(), 1);
         assert_eq!(report.schema_drift.changed_types[0].field_name, "id");
         assert_eq!(report.source_identifier, "s");
@@ -177,16 +190,22 @@ mod tests {
         let source_batch = RecordBatch::try_new(
             Arc::new(schema.clone()),
             vec![Arc::new(StringArray::from(vec![
-                Some("a@x.com"), Some("b@x.com"), Some("c@x.com"),
-                Some("d@x.com"), Some("e@x.com"),
+                Some("a@x.com"),
+                Some("b@x.com"),
+                Some("c@x.com"),
+                Some("d@x.com"),
+                Some("e@x.com"),
             ]))],
         )
         .unwrap();
         let target_batch = RecordBatch::try_new(
             Arc::new(schema.clone()),
             vec![Arc::new(StringArray::from(vec![
-                Some("not-email"), Some("not-email"), Some("not-email"),
-                Some("not-email"), Some("not-email"),
+                Some("not-email"),
+                Some("not-email"),
+                Some("not-email"),
+                Some("not-email"),
+                Some("not-email"),
             ]))],
         )
         .unwrap();
@@ -203,8 +222,7 @@ mod tests {
     async fn test_diff_provider_error() {
         let error_provider: Arc<dyn DataProvider> = Arc::new(ErrorProvider);
         let schema = int32_schema("val");
-        let dummy: Arc<dyn DataProvider> =
-            MockDataProvider::new(schema, vec![]);
+        let dummy: Arc<dyn DataProvider> = MockDataProvider::new(schema, vec![]);
 
         let result = diff_datasets(error_provider, "s", dummy, "t").await;
         assert!(result.is_err());

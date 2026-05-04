@@ -1,6 +1,6 @@
+use crate::Result;
 use serde::Deserialize;
 use std::collections::HashMap;
-use crate::Result;
 
 #[derive(Debug, Deserialize)]
 pub struct Config {
