@@ -1,9 +1,9 @@
+use crate::semantic::{SemanticType, infer_semantic_type};
 use arrow::array::{Array, Float32Array, Float64Array, Int16Array, Int32Array, Int64Array};
 use arrow::datatypes::{DataType, Schema};
 use arrow::record_batch::RecordBatch;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
-use crate::semantic::{infer_semantic_type, SemanticType};
 
 #[derive(Debug, Serialize, PartialEq)]
 pub struct SchemaDrift {
@@ -81,7 +81,10 @@ pub fn detect_schema_drift(source: &Schema, target: &Schema) -> SchemaDrift {
     }
 }
 
-pub fn detect_semantic_drift(source_batches: &[RecordBatch], target_batches: &[RecordBatch]) -> Vec<SemanticDrift> {
+pub fn detect_semantic_drift(
+    source_batches: &[RecordBatch],
+    target_batches: &[RecordBatch],
+) -> Vec<SemanticDrift> {
     let mut semantic_drifts = Vec::new();
 
     if source_batches.is_empty() || target_batches.is_empty() {
@@ -91,8 +94,16 @@ pub fn detect_semantic_drift(source_batches: &[RecordBatch], target_batches: &[R
     let source_schema = source_batches[0].schema();
     let target_schema = target_batches[0].schema();
 
-    let source_fields: HashSet<_> = source_schema.fields().iter().map(|f| f.name().clone()).collect();
-    let target_fields: HashSet<_> = target_schema.fields().iter().map(|f| f.name().clone()).collect();
+    let source_fields: HashSet<_> = source_schema
+        .fields()
+        .iter()
+        .map(|f| f.name().clone())
+        .collect();
+    let target_fields: HashSet<_> = target_schema
+        .fields()
+        .iter()
+        .map(|f| f.name().clone())
+        .collect();
 
     for field_name in source_fields.intersection(&target_fields) {
         let source_col = source_batches[0].column_by_name(field_name).unwrap();
@@ -132,22 +143,50 @@ pub fn calculate_column_stats(batches: &[RecordBatch], column_name: &str) -> Opt
         row_count += batch.num_rows();
 
         match column.data_type() {
-            DataType::Int16 | DataType::Int32 | DataType::Int64 | DataType::Float32 | DataType::Float64 => {
+            DataType::Int16
+            | DataType::Int32
+            | DataType::Int64
+            | DataType::Float32
+            | DataType::Float64 => {
                 has_numeric = true;
                 for i in 0..column.len() {
                     if !column.is_null(i) {
                         let val = match column.data_type() {
-                            DataType::Int16 => column.as_any().downcast_ref::<Int16Array>().unwrap().value(i) as f64,
-                            DataType::Int32 => column.as_any().downcast_ref::<Int32Array>().unwrap().value(i) as f64,
-                            DataType::Int64 => column.as_any().downcast_ref::<Int64Array>().unwrap().value(i) as f64,
-                            DataType::Float32 => column.as_any().downcast_ref::<Float32Array>().unwrap().value(i) as f64,
-                            DataType::Float64 => column.as_any().downcast_ref::<Float64Array>().unwrap().value(i),
+                            DataType::Int16 => column
+                                .as_any()
+                                .downcast_ref::<Int16Array>()
+                                .unwrap()
+                                .value(i) as f64,
+                            DataType::Int32 => column
+                                .as_any()
+                                .downcast_ref::<Int32Array>()
+                                .unwrap()
+                                .value(i) as f64,
+                            DataType::Int64 => column
+                                .as_any()
+                                .downcast_ref::<Int64Array>()
+                                .unwrap()
+                                .value(i) as f64,
+                            DataType::Float32 => column
+                                .as_any()
+                                .downcast_ref::<Float32Array>()
+                                .unwrap()
+                                .value(i) as f64,
+                            DataType::Float64 => column
+                                .as_any()
+                                .downcast_ref::<Float64Array>()
+                                .unwrap()
+                                .value(i),
                             _ => unreachable!(),
                         };
                         sum += val;
                         numeric_count += 1;
-                        if val < min { min = val; }
-                        if val > max { max = val; }
+                        if val < min {
+                            min = val;
+                        }
+                        if val > max {
+                            max = val;
+                        }
                     }
                 }
             }
@@ -158,13 +197,28 @@ pub fn calculate_column_stats(batches: &[RecordBatch], column_name: &str) -> Opt
     Some(ColumnStats {
         null_count,
         row_count,
-        mean: if has_numeric && numeric_count > 0 { Some(sum / numeric_count as f64) } else { None },
-        min: if has_numeric && numeric_count > 0 { Some(min) } else { None },
-        max: if has_numeric && numeric_count > 0 { Some(max) } else { None },
+        mean: if has_numeric && numeric_count > 0 {
+            Some(sum / numeric_count as f64)
+        } else {
+            None
+        },
+        min: if has_numeric && numeric_count > 0 {
+            Some(min)
+        } else {
+            None
+        },
+        max: if has_numeric && numeric_count > 0 {
+            Some(max)
+        } else {
+            None
+        },
     })
 }
 
-pub fn detect_data_drift(source_batches: &[RecordBatch], target_batches: &[RecordBatch]) -> DataDrift {
+pub fn detect_data_drift(
+    source_batches: &[RecordBatch],
+    target_batches: &[RecordBatch],
+) -> DataDrift {
     let mut column_drifts = HashMap::new();
 
     if source_batches.is_empty() || target_batches.is_empty() {
@@ -174,8 +228,16 @@ pub fn detect_data_drift(source_batches: &[RecordBatch], target_batches: &[Recor
     let source_schema = source_batches[0].schema();
     let target_schema = target_batches[0].schema();
 
-    let source_fields: HashSet<_> = source_schema.fields().iter().map(|f| f.name().clone()).collect();
-    let target_fields: HashSet<_> = target_schema.fields().iter().map(|f| f.name().clone()).collect();
+    let source_fields: HashSet<_> = source_schema
+        .fields()
+        .iter()
+        .map(|f| f.name().clone())
+        .collect();
+    let target_fields: HashSet<_> = target_schema
+        .fields()
+        .iter()
+        .map(|f| f.name().clone())
+        .collect();
 
     for field_name in source_fields.intersection(&target_fields) {
         let (source_stats, target_stats) = match (
@@ -186,24 +248,29 @@ pub fn detect_data_drift(source_batches: &[RecordBatch], target_batches: &[Recor
             _ => continue,
         };
 
-        let mean_drift = if let (Some(s_mean), Some(t_mean)) = (source_stats.mean, target_stats.mean) {
-            Some((t_mean - s_mean).abs())
-        } else {
-            None
-        };
+        let mean_drift =
+            if let (Some(s_mean), Some(t_mean)) = (source_stats.mean, target_stats.mean) {
+                Some((t_mean - s_mean).abs())
+            } else {
+                None
+            };
 
         let null_count_drift = target_stats.null_count as i64 - source_stats.null_count as i64;
 
-        let (ks_statistic, ks_p_value) = calculate_ks_test(source_batches, target_batches, field_name);
+        let (ks_statistic, ks_p_value) =
+            calculate_ks_test(source_batches, target_batches, field_name);
 
-        column_drifts.insert(field_name.clone(), ColumnDrift {
-            source_stats,
-            target_stats,
-            mean_drift,
-            null_count_drift,
-            ks_statistic,
-            ks_p_value,
-        });
+        column_drifts.insert(
+            field_name.clone(),
+            ColumnDrift {
+                source_stats,
+                target_stats,
+                mean_drift,
+                null_count_drift,
+                ks_statistic,
+                ks_p_value,
+            },
+        );
     }
 
     DataDrift { column_drifts }
@@ -217,31 +284,41 @@ fn extract_numeric_values(batches: &[RecordBatch], column_name: &str) -> Vec<f64
                 DataType::Int16 => {
                     let arr = column.as_any().downcast_ref::<Int16Array>().unwrap();
                     for i in 0..arr.len() {
-                        if !arr.is_null(i) { values.push(arr.value(i) as f64); }
+                        if !arr.is_null(i) {
+                            values.push(arr.value(i) as f64);
+                        }
                     }
                 }
                 DataType::Int32 => {
                     let arr = column.as_any().downcast_ref::<Int32Array>().unwrap();
                     for i in 0..arr.len() {
-                        if !arr.is_null(i) { values.push(arr.value(i) as f64); }
+                        if !arr.is_null(i) {
+                            values.push(arr.value(i) as f64);
+                        }
                     }
                 }
                 DataType::Int64 => {
                     let arr = column.as_any().downcast_ref::<Int64Array>().unwrap();
                     for i in 0..arr.len() {
-                        if !arr.is_null(i) { values.push(arr.value(i) as f64); }
+                        if !arr.is_null(i) {
+                            values.push(arr.value(i) as f64);
+                        }
                     }
                 }
                 DataType::Float32 => {
                     let arr = column.as_any().downcast_ref::<Float32Array>().unwrap();
                     for i in 0..arr.len() {
-                        if !arr.is_null(i) { values.push(arr.value(i) as f64); }
+                        if !arr.is_null(i) {
+                            values.push(arr.value(i) as f64);
+                        }
                     }
                 }
                 DataType::Float64 => {
                     let arr = column.as_any().downcast_ref::<Float64Array>().unwrap();
                     for i in 0..arr.len() {
-                        if !arr.is_null(i) { values.push(arr.value(i)); }
+                        if !arr.is_null(i) {
+                            values.push(arr.value(i));
+                        }
                     }
                 }
                 _ => {}
@@ -251,7 +328,11 @@ fn extract_numeric_values(batches: &[RecordBatch], column_name: &str) -> Vec<f64
     values
 }
 
-fn calculate_ks_test(source_batches: &[RecordBatch], target_batches: &[RecordBatch], column_name: &str) -> (Option<f64>, Option<f64>) {
+fn calculate_ks_test(
+    source_batches: &[RecordBatch],
+    target_batches: &[RecordBatch],
+    column_name: &str,
+) -> (Option<f64>, Option<f64>) {
     let mut source_vals = extract_numeric_values(source_batches, column_name);
     let mut target_vals = extract_numeric_values(target_batches, column_name);
 
@@ -303,8 +384,7 @@ fn calculate_ks_test(source_batches: &[RecordBatch], target_batches: &[RecordBat
             sum += sign * (-2.0 * (k as f64 * lambda).powi(2)).exp();
         }
         p_value = 2.0 * sum;
-        if p_value < 0.0 { p_value = 0.0; }
-        if p_value > 1.0 { p_value = 1.0; }
+        p_value = p_value.clamp(0.0, 1.0);
     }
 
     (Some(max_dist), Some(p_value))
@@ -455,19 +535,19 @@ mod tests {
 
     #[test]
     fn test_detect_data_drift() {
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("val", DataType::Int32, true),
-        ]));
+        let schema = Arc::new(Schema::new(vec![Field::new("val", DataType::Int32, true)]));
 
         let source_batch = RecordBatch::try_new(
             schema.clone(),
             vec![Arc::new(Int32Array::from(vec![Some(1), Some(2), Some(3)]))],
-        ).unwrap();
+        )
+        .unwrap();
 
         let target_batch = RecordBatch::try_new(
             schema.clone(),
             vec![Arc::new(Int32Array::from(vec![Some(10), Some(20), None]))],
-        ).unwrap();
+        )
+        .unwrap();
 
         let drift = detect_data_drift(&[source_batch], &[target_batch]);
 
@@ -540,13 +620,23 @@ mod tests {
         // Target: same column name but with plain strings → Unknown
         let source = str_batch(
             "contact",
-            vec![Some("a@x.com"), Some("b@x.com"), Some("c@x.com"),
-                 Some("d@x.com"), Some("e@x.com")],
+            vec![
+                Some("a@x.com"),
+                Some("b@x.com"),
+                Some("c@x.com"),
+                Some("d@x.com"),
+                Some("e@x.com"),
+            ],
         );
         let target = str_batch(
             "contact",
-            vec![Some("not-an-email"), Some("also-not"), Some("nope"),
-                 Some("random"), Some("text")],
+            vec![
+                Some("not-an-email"),
+                Some("also-not"),
+                Some("nope"),
+                Some("random"),
+                Some("text"),
+            ],
         );
         let result = detect_semantic_drift(&[source], &[target]);
         assert_eq!(result.len(), 1);
