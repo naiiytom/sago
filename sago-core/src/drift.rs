@@ -178,8 +178,13 @@ pub fn detect_data_drift(source_batches: &[RecordBatch], target_batches: &[Recor
     let target_fields: HashSet<_> = target_schema.fields().iter().map(|f| f.name().clone()).collect();
 
     for field_name in source_fields.intersection(&target_fields) {
-        let source_stats = calculate_column_stats(source_batches, field_name).unwrap();
-        let target_stats = calculate_column_stats(target_batches, field_name).unwrap();
+        let (source_stats, target_stats) = match (
+            calculate_column_stats(source_batches, field_name),
+            calculate_column_stats(target_batches, field_name),
+        ) {
+            (Some(s), Some(t)) => (s, t),
+            _ => continue,
+        };
 
         let mean_drift = if let (Some(s_mean), Some(t_mean)) = (source_stats.mean, target_stats.mean) {
             Some((t_mean - s_mean).abs())

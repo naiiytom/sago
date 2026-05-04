@@ -34,7 +34,7 @@ pub fn infer_semantic_type(column_name: &str, array: &dyn Array) -> SemanticType
         return SemanticType::PhoneNumber;
     } else if lower_name.contains("uuid") {
         return SemanticType::UUID;
-    } else if lower_name.contains("ip_address") || lower_name.contains("ip") {
+    } else if lower_name.split(|c: char| !c.is_alphanumeric()).any(|seg| seg == "ip") {
         return SemanticType::IPAddress;
     } else if lower_name.contains("url") || lower_name.contains("website") {
         return SemanticType::Url;

@@ -18,7 +18,7 @@ impl PostgresSchemaProvider {
     pub(crate) fn map_postgres_type(data_type: &str) -> DataType {
         match data_type {
             "boolean" => DataType::Boolean,
-            "smallint" | "int2" => DataType::Int16,
+            "smallint" | "int2" | "smallserial" => DataType::Int16,
             "integer" | "int4" | "serial" => DataType::Int32,
             "bigint" | "int8" | "bigserial" => DataType::Int64,
             "real" | "float4" => DataType::Float32,
