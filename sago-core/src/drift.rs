@@ -2,7 +2,7 @@ use crate::semantic::{SemanticType, infer_semantic_type};
 use arrow::array::{Array, Float32Array, Float64Array, Int16Array, Int32Array, Int64Array};
 use arrow::datatypes::{DataType, Schema};
 use arrow::record_batch::RecordBatch;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -27,7 +27,7 @@ pub struct TypeChange {
     pub new_type: String,
 }
 
-#[derive(Debug, Serialize, PartialEq, Clone)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
 pub struct ColumnStats {
     pub null_count: usize,
     pub row_count: usize,
@@ -643,5 +643,21 @@ mod tests {
         assert_eq!(result[0].field_name, "contact");
         assert_eq!(result[0].source_type, SemanticType::Email);
         assert_eq!(result[0].target_type, SemanticType::Unknown);
+    }
+
+    // ── ColumnStats round-trip (JSON serialization) ──────────────────────────
+
+    #[test]
+    fn test_column_stats_json_round_trip() {
+        let stats = ColumnStats {
+            null_count: 3,
+            row_count: 10,
+            mean: Some(4.2),
+            min: Some(0.0),
+            max: Some(10.0),
+        };
+        let json = serde_json::to_string(&stats).unwrap();
+        let back: ColumnStats = serde_json::from_str(&json).unwrap();
+        assert_eq!(stats, back);
     }
 }
