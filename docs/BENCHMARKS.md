@@ -28,8 +28,8 @@ This document lists external benchmarks and research papers that inform the drif
 - **Authors:** Xiaoyu Yang, Jie Lu, and En Yu (UTS)
 - **Key Contribution:** The **OpenMMlo** benchmark dataset for handling long-tailed distributions and OOD sudden shifts.
 
-## Benchmarking Strategy for Sago Phase 3
+## Benchmarking Strategy for Sago Phase 4
 
 1. **PSI & Merkle Efficiency:** Measure the overhead of Merkle Tree generation and path verification across different dataset sizes (N=10^3 to 10^6).
-2. **Distribution Drift:** Implement the **Kolmogorov-Smirnov (KS) test** and **Population Stability Index (PSI)** metrics identified in NannyML and CheXstray.
+2. **Distribution Drift:** ~~**Kolmogorov-Smirnov (KS) test**~~ ✅ Implemented in `sago-core/src/drift.rs`. **Population Stability Index (PSI)** — not yet implemented, planned for Phase 4.
 3. **Cross-Modal Validation:** Compare synchronization performance between PostgreSQL and S3 Parquet using the "Security-by-Design" framework principles.

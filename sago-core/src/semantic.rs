@@ -34,60 +34,63 @@ pub fn infer_semantic_type(column_name: &str, array: &dyn Array) -> SemanticType
         return SemanticType::PhoneNumber;
     } else if lower_name.contains("uuid") {
         return SemanticType::UUID;
-    } else if lower_name.contains("ip_address") || lower_name.contains("ip") {
+    } else if lower_name
+        .split(|c: char| !c.is_alphanumeric())
+        .any(|seg| seg == "ip")
+    {
         return SemanticType::IPAddress;
     } else if lower_name.contains("url") || lower_name.contains("website") {
         return SemanticType::Url;
     }
 
-    if array.data_type() == &DataType::Utf8 || array.data_type() == &DataType::LargeUtf8 {
-        if let Some(string_array) = array.as_any().downcast_ref::<StringArray>() {
-            let mut email_count = 0;
-            let mut cc_count = 0;
-            let mut phone_count = 0;
-            let mut uuid_count = 0;
-            let mut ip_count = 0;
-            let mut url_count = 0;
-            let mut total_checked = 0;
+    if (array.data_type() == &DataType::Utf8 || array.data_type() == &DataType::LargeUtf8)
+        && let Some(string_array) = array.as_any().downcast_ref::<StringArray>()
+    {
+        let mut email_count = 0;
+        let mut cc_count = 0;
+        let mut phone_count = 0;
+        let mut uuid_count = 0;
+        let mut ip_count = 0;
+        let mut url_count = 0;
+        let mut total_checked = 0;
 
-            let check_limit = std::cmp::min(100, string_array.len());
+        let check_limit = std::cmp::min(100, string_array.len());
 
-            for i in 0..check_limit {
-                if !string_array.is_null(i) {
-                    total_checked += 1;
-                    let val = string_array.value(i);
+        for i in 0..check_limit {
+            if !string_array.is_null(i) {
+                total_checked += 1;
+                let val = string_array.value(i);
 
-                    if EMAIL_REGEX.is_match(val) {
-                        email_count += 1;
-                    } else if CREDIT_CARD_REGEX.is_match(val) {
-                        cc_count += 1;
-                    } else if PHONE_NUMBER_REGEX.is_match(val) {
-                        phone_count += 1;
-                    } else if UUID_REGEX.is_match(val) {
-                        uuid_count += 1;
-                    } else if IP_ADDRESS_REGEX.is_match(val) {
-                        ip_count += 1;
-                    } else if URL_REGEX.is_match(val) {
-                        url_count += 1;
-                    }
+                if EMAIL_REGEX.is_match(val) {
+                    email_count += 1;
+                } else if CREDIT_CARD_REGEX.is_match(val) {
+                    cc_count += 1;
+                } else if PHONE_NUMBER_REGEX.is_match(val) {
+                    phone_count += 1;
+                } else if UUID_REGEX.is_match(val) {
+                    uuid_count += 1;
+                } else if IP_ADDRESS_REGEX.is_match(val) {
+                    ip_count += 1;
+                } else if URL_REGEX.is_match(val) {
+                    url_count += 1;
                 }
             }
+        }
 
-            if total_checked > 0 {
-                let threshold = (total_checked as f32) * 0.8;
-                if (email_count as f32) >= threshold {
-                    return SemanticType::Email;
-                } else if (cc_count as f32) >= threshold {
-                    return SemanticType::CreditCard;
-                } else if (phone_count as f32) >= threshold {
-                    return SemanticType::PhoneNumber;
-                } else if (uuid_count as f32) >= threshold {
-                    return SemanticType::UUID;
-                } else if (ip_count as f32) >= threshold {
-                    return SemanticType::IPAddress;
-                } else if (url_count as f32) >= threshold {
-                    return SemanticType::Url;
-                }
+        if total_checked > 0 {
+            let threshold = (total_checked as f32) * 0.8;
+            if (email_count as f32) >= threshold {
+                return SemanticType::Email;
+            } else if (cc_count as f32) >= threshold {
+                return SemanticType::CreditCard;
+            } else if (phone_count as f32) >= threshold {
+                return SemanticType::PhoneNumber;
+            } else if (uuid_count as f32) >= threshold {
+                return SemanticType::UUID;
+            } else if (ip_count as f32) >= threshold {
+                return SemanticType::IPAddress;
+            } else if (url_count as f32) >= threshold {
+                return SemanticType::Url;
             }
         }
     }
@@ -105,12 +108,63 @@ mod tests {
     #[test]
     fn test_infer_by_name() {
         let array = StringArray::from(vec!["test"]);
-        assert_eq!(infer_semantic_type("user_email", &array), SemanticType::Email);
-        assert_eq!(infer_semantic_type("credit_card_number", &array), SemanticType::CreditCard);
-        assert_eq!(infer_semantic_type("phone_num", &array), SemanticType::PhoneNumber);
-        assert_eq!(infer_semantic_type("session_uuid", &array), SemanticType::UUID);
-        assert_eq!(infer_semantic_type("client_ip", &array), SemanticType::IPAddress);
-        assert_eq!(infer_semantic_type("website_url", &array), SemanticType::Url);
+        assert_eq!(
+            infer_semantic_type("user_email", &array),
+            SemanticType::Email
+        );
+        assert_eq!(
+            infer_semantic_type("credit_card_number", &array),
+            SemanticType::CreditCard
+        );
+        assert_eq!(
+            infer_semantic_type("phone_num", &array),
+            SemanticType::PhoneNumber
+        );
+        assert_eq!(
+            infer_semantic_type("session_uuid", &array),
+            SemanticType::UUID
+        );
+        assert_eq!(
+            infer_semantic_type("client_ip", &array),
+            SemanticType::IPAddress
+        );
+        assert_eq!(
+            infer_semantic_type("website_url", &array),
+            SemanticType::Url
+        );
+    }
+
+    #[test]
+    fn test_ip_name_regression() {
+        // The `ip` name-hint must match only as a whole word-segment, not as a
+        // substring — `script`, `zip`, `tip`, `recipient` previously triggered
+        // false-positive IPAddress classification.
+        let array = StringArray::from(vec!["test"]);
+
+        // Should NOT classify as IPAddress
+        for name in [
+            "script",
+            "scripted",
+            "zip_code",
+            "tip_amount",
+            "recipient",
+            "shipment",
+        ] {
+            assert_eq!(
+                infer_semantic_type(name, &array),
+                SemanticType::Unknown,
+                "{name} should not match IPAddress",
+            );
+        }
+
+        // Should still classify as IPAddress
+        for name in ["ip_address", "client_ip", "ip", "source.ip", "user-ip-addr"] {
+            assert_eq!(
+                infer_semantic_type(name, &array),
+                SemanticType::IPAddress,
+                "{name} should match IPAddress",
+            );
+        }
     }
 
     // ── data-based inference — each semantic type ────────────────────────────
@@ -118,9 +172,15 @@ mod tests {
     #[test]
     fn test_infer_by_data_email() {
         let array = StringArray::from(vec![
-            Some("test@example.com"), Some("user@domain.org"), None, Some("another@email.net"),
+            Some("test@example.com"),
+            Some("user@domain.org"),
+            None,
+            Some("another@email.net"),
         ]);
-        assert_eq!(infer_semantic_type("unknown_col", &array), SemanticType::Email);
+        assert_eq!(
+            infer_semantic_type("unknown_col", &array),
+            SemanticType::Email
+        );
     }
 
     #[test]
@@ -133,7 +193,10 @@ mod tests {
             Some("4111111111111111"),
             Some("4012888888881881"),
         ]);
-        assert_eq!(infer_semantic_type("unknown_col", &array), SemanticType::CreditCard);
+        assert_eq!(
+            infer_semantic_type("unknown_col", &array),
+            SemanticType::CreditCard
+        );
     }
 
     #[test]
@@ -145,7 +208,10 @@ mod tests {
             Some("+14155552672"),
             Some("+14155552673"),
         ]);
-        assert_eq!(infer_semantic_type("unknown_col", &array), SemanticType::PhoneNumber);
+        assert_eq!(
+            infer_semantic_type("unknown_col", &array),
+            SemanticType::PhoneNumber
+        );
     }
 
     #[test]
@@ -157,7 +223,10 @@ mod tests {
             Some("6ba7b812-9dad-11d1-80b4-00c04fd430c8"),
             Some("6ba7b813-9dad-11d1-80b4-00c04fd430c8"),
         ]);
-        assert_eq!(infer_semantic_type("unknown_col", &array), SemanticType::UUID);
+        assert_eq!(
+            infer_semantic_type("unknown_col", &array),
+            SemanticType::UUID
+        );
     }
 
     #[test]
@@ -169,7 +238,10 @@ mod tests {
             Some("8.8.8.8"),
             Some("1.1.1.1"),
         ]);
-        assert_eq!(infer_semantic_type("unknown_col", &array), SemanticType::IPAddress);
+        assert_eq!(
+            infer_semantic_type("unknown_col", &array),
+            SemanticType::IPAddress
+        );
     }
 
     #[test]
@@ -181,7 +253,10 @@ mod tests {
             Some("https://baz.net/page"),
             Some("http://qux.com"),
         ]);
-        assert_eq!(infer_semantic_type("unknown_col", &array), SemanticType::Url);
+        assert_eq!(
+            infer_semantic_type("unknown_col", &array),
+            SemanticType::Url
+        );
     }
 
     // ── threshold boundary behaviour ─────────────────────────────────────────
@@ -201,7 +276,10 @@ mod tests {
             Some("not-an-email"),
             Some("not-an-email"),
         ]);
-        assert_eq!(infer_semantic_type("unknown_col", &array), SemanticType::Unknown);
+        assert_eq!(
+            infer_semantic_type("unknown_col", &array),
+            SemanticType::Unknown
+        );
     }
 
     #[test]
@@ -219,7 +297,10 @@ mod tests {
             Some("not-an-email"),
             Some("not-an-email"),
         ]);
-        assert_eq!(infer_semantic_type("unknown_col", &array), SemanticType::Email);
+        assert_eq!(
+            infer_semantic_type("unknown_col", &array),
+            SemanticType::Email
+        );
     }
 
     // ── non-Utf8 and all-null arrays ─────────────────────────────────────────
@@ -227,12 +308,18 @@ mod tests {
     #[test]
     fn test_non_utf8_array() {
         let array = Int32Array::from(vec![1, 2, 3]);
-        assert_eq!(infer_semantic_type("unknown_col", &array), SemanticType::Unknown);
+        assert_eq!(
+            infer_semantic_type("unknown_col", &array),
+            SemanticType::Unknown
+        );
     }
 
     #[test]
     fn test_all_null_array() {
         let array = StringArray::from(vec![None::<&str>, None, None]);
-        assert_eq!(infer_semantic_type("unknown_col", &array), SemanticType::Unknown);
+        assert_eq!(
+            infer_semantic_type("unknown_col", &array),
+            SemanticType::Unknown
+        );
     }
 }

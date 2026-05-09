@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand};
-use tracing::{info, Level};
+use tracing::{Level, info};
 use tracing_subscriber::FmtSubscriber;
 
 #[derive(Parser)]
@@ -35,8 +35,7 @@ async fn main() -> anyhow::Result<()> {
         .with_max_level(cli.log_level)
         .finish();
 
-    tracing::subscriber::set_global_default(subscriber)
-        .expect("setting default subscriber failed");
+    tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
 
     match &cli.command {
         Commands::Init { name } => {

@@ -25,11 +25,11 @@ pub enum SagoError {
 }
 
 pub mod config;
+pub mod diff;
+pub mod drift;
 pub mod postgres;
 pub mod s3;
-pub mod drift;
 pub mod semantic;
-pub mod diff;
 
 pub type Result<T> = std::result::Result<T, SagoError>;
 
@@ -50,8 +50,7 @@ pub trait DataProvider: SchemaProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow::datatypes::{Field, DataType};
-    
+    use arrow::datatypes::{DataType, Field};
 
     struct MockSchemaProvider;
 
