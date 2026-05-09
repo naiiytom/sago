@@ -10,4 +10,5 @@ tokio.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-ratatui.workspace = true
+# ratatui dep deferred — re-enable when TUI scaffolding lands (Phase 4).
+# Workspace declaration is kept in /Cargo.toml so other crates can pick it up.

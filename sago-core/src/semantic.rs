@@ -134,6 +134,39 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_ip_name_regression() {
+        // The `ip` name-hint must match only as a whole word-segment, not as a
+        // substring — `script`, `zip`, `tip`, `recipient` previously triggered
+        // false-positive IPAddress classification.
+        let array = StringArray::from(vec!["test"]);
+
+        // Should NOT classify as IPAddress
+        for name in [
+            "script",
+            "scripted",
+            "zip_code",
+            "tip_amount",
+            "recipient",
+            "shipment",
+        ] {
+            assert_eq!(
+                infer_semantic_type(name, &array),
+                SemanticType::Unknown,
+                "{name} should not match IPAddress",
+            );
+        }
+
+        // Should still classify as IPAddress
+        for name in ["ip_address", "client_ip", "ip", "source.ip", "user-ip-addr"] {
+            assert_eq!(
+                infer_semantic_type(name, &array),
+                SemanticType::IPAddress,
+                "{name} should match IPAddress",
+            );
+        }
+    }
+
     // ── data-based inference — each semantic type ────────────────────────────
 
     #[test]

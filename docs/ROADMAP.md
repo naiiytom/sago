@@ -20,7 +20,7 @@
 
 ## Phase 4: Near-Term Work
 - [ ] **CLI Implementation**: Wire `init`, `plan`, and `apply` commands to actual sago-core logic (currently stubs).
-- [ ] **TUI**: Implement `ratatui`-based interactive terminal UI for exploration (dependency already added).
+- [ ] **TUI**: Implement `ratatui`-based interactive terminal UI for exploration (workspace dep declared; re-enable in `sago-cli/Cargo.toml` when scaffolding lands).
 - [ ] **PSI Metric**: Implement Population Stability Index alongside the existing KS test for richer distribution drift detection.
 - [ ] **sago-sdk**: Implement real SDK bindings to sago-core (currently placeholder).
 - [ ] **sago-proto**: Define `.proto` files and gRPC service definitions (currently placeholder, no proto files).
@@ -29,6 +29,6 @@
 ## Phase 5: Future Directions
 - [ ] **Semantic Smart Renaming**: Intelligently handle column renames without breaking pipelines.
 - [ ] **3-Way Merge**: Handle conflicting schema changes gracefully.
-- [ ] **Merkle Trees / PSI**: Verifiable data synchronization using Merkle tree commitments and Private Set Intersection.
+- [ ] **Merkle Trees**: Verifiable data synchronization using Merkle tree commitments (PSI is tracked under Phase 4).
 - [ ] **WASM Integration**: Compile core logic to WebAssembly for browser-based tools or edge execution.
 - [ ] **Decentralized Data Architectures**: Support for distributed data mesh concepts.
