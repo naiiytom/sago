@@ -228,15 +228,13 @@ pub fn detect_data_drift_from_stats(
         let source_stats = source.get(*field_name).unwrap().clone();
         let target_stats = target.get(*field_name).unwrap().clone();
 
-        let mean_drift =
-            if let (Some(s), Some(t)) = (source_stats.mean, target_stats.mean) {
-                Some((t - s).abs())
-            } else {
-                None
-            };
+        let mean_drift = if let (Some(s), Some(t)) = (source_stats.mean, target_stats.mean) {
+            Some((t - s).abs())
+        } else {
+            None
+        };
 
-        let null_count_drift =
-            target_stats.null_count as i64 - source_stats.null_count as i64;
+        let null_count_drift = target_stats.null_count as i64 - source_stats.null_count as i64;
 
         column_drifts.insert(
             (*field_name).clone(),
@@ -709,17 +707,35 @@ mod tests {
         let mut source = HashMap::new();
         source.insert(
             "score".to_string(),
-            ColumnStats { null_count: 0, row_count: 100, mean: Some(50.0), min: Some(0.0), max: Some(100.0) },
+            ColumnStats {
+                null_count: 0,
+                row_count: 100,
+                mean: Some(50.0),
+                min: Some(0.0),
+                max: Some(100.0),
+            },
         );
         source.insert(
             "extra".to_string(),
-            ColumnStats { null_count: 0, row_count: 100, mean: Some(1.0), min: Some(1.0), max: Some(1.0) },
+            ColumnStats {
+                null_count: 0,
+                row_count: 100,
+                mean: Some(1.0),
+                min: Some(1.0),
+                max: Some(1.0),
+            },
         );
 
         let mut target = HashMap::new();
         target.insert(
             "score".to_string(),
-            ColumnStats { null_count: 5, row_count: 100, mean: Some(60.0), min: Some(0.0), max: Some(100.0) },
+            ColumnStats {
+                null_count: 5,
+                row_count: 100,
+                mean: Some(60.0),
+                min: Some(0.0),
+                max: Some(100.0),
+            },
         );
         // 'extra' missing from target — should be skipped (intersection only)
 

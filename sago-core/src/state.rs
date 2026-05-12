@@ -4,8 +4,8 @@ use std::path::Path;
 use arrow::datatypes::{DataType, Field, Schema};
 use serde::{Deserialize, Serialize};
 
-use crate::drift::{calculate_column_stats, extract_numeric_values, ColumnStats};
-use crate::semantic::{infer_semantic_type, SemanticType};
+use crate::drift::{ColumnStats, calculate_column_stats, extract_numeric_values};
+use crate::semantic::{SemanticType, infer_semantic_type};
 use crate::{DataProvider, Result, SagoError};
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
@@ -64,16 +64,20 @@ fn parse_data_type(s: &str) -> Result<DataType> {
         "LargeUtf8" => Ok(DataType::LargeUtf8),
         "Binary" => Ok(DataType::Binary),
         "Date32" => Ok(DataType::Date32),
-        "Timestamp(Nanosecond, None)" => {
-            Ok(DataType::Timestamp(arrow::datatypes::TimeUnit::Nanosecond, None))
-        }
+        "Timestamp(Nanosecond, None)" => Ok(DataType::Timestamp(
+            arrow::datatypes::TimeUnit::Nanosecond,
+            None,
+        )),
         other if other.starts_with("Timestamp(Nanosecond, Some(") => {
             // Extract timezone from debug repr: Timestamp(Nanosecond, Some("tz"))
             let tz = other
                 .trim_start_matches("Timestamp(Nanosecond, Some(\"")
                 .trim_end_matches("\"))")
                 .to_string();
-            Ok(DataType::Timestamp(arrow::datatypes::TimeUnit::Nanosecond, Some(tz.into())))
+            Ok(DataType::Timestamp(
+                arrow::datatypes::TimeUnit::Nanosecond,
+                Some(tz.into()),
+            ))
         }
         other => Err(SagoError::Schema(format!(
             "unsupported serialized data type: {}",
@@ -101,7 +105,10 @@ pub struct TargetSnapshot {
 
 impl ProjectState {
     pub fn empty() -> Self {
-        ProjectState { schema_version: CURRENT_SCHEMA_VERSION, snapshots: HashMap::new() }
+        ProjectState {
+            schema_version: CURRENT_SCHEMA_VERSION,
+            snapshots: HashMap::new(),
+        }
     }
 
     pub fn load(path: &Path) -> Result<Self> {
@@ -120,8 +127,8 @@ impl ProjectState {
     pub fn load_or_default(path: &Path) -> Result<Self> {
         match std::fs::read(path) {
             Ok(bytes) => {
-                let state: ProjectState = serde_json::from_slice(&bytes)
-                    .map_err(|e| SagoError::Config(e.to_string()))?;
+                let state: ProjectState =
+                    serde_json::from_slice(&bytes).map_err(|e| SagoError::Config(e.to_string()))?;
                 if state.schema_version != CURRENT_SCHEMA_VERSION {
                     return Err(SagoError::Config(format!(
                         "unsupported state schema_version: {} (expected {})",
@@ -139,8 +146,8 @@ impl ProjectState {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(SagoError::Io)?;
         }
-        let json = serde_json::to_string_pretty(self)
-            .map_err(|e| SagoError::Config(e.to_string()))?;
+        let json =
+            serde_json::to_string_pretty(self).map_err(|e| SagoError::Config(e.to_string()))?;
         std::fs::write(path, json).map_err(SagoError::Io)?;
         Ok(())
     }
@@ -227,8 +234,19 @@ mod tests {
             Field::new("id", DataType::Int64, false),
             Field::new("email", DataType::Utf8, true),
             Field::new("active", DataType::Boolean, false),
-            Field::new("created_at", DataType::Timestamp(arrow::datatypes::TimeUnit::Nanosecond, None), true),
-            Field::new("updated_at", DataType::Timestamp(arrow::datatypes::TimeUnit::Nanosecond, Some("+00:00".into())), false),
+            Field::new(
+                "created_at",
+                DataType::Timestamp(arrow::datatypes::TimeUnit::Nanosecond, None),
+                true,
+            ),
+            Field::new(
+                "updated_at",
+                DataType::Timestamp(
+                    arrow::datatypes::TimeUnit::Nanosecond,
+                    Some("+00:00".into()),
+                ),
+                false,
+            ),
         ]);
         let s: SerializableSchema = (&original).into();
         let json = serde_json::to_string(&s).unwrap();
@@ -240,8 +258,17 @@ mod tests {
         assert_eq!(restored.field(0).data_type(), &DataType::Int64);
         assert_eq!(restored.field(1).data_type(), &DataType::Utf8);
         assert_eq!(restored.field(2).is_nullable(), false);
-        assert_eq!(restored.field(3).data_type(), &DataType::Timestamp(arrow::datatypes::TimeUnit::Nanosecond, None));
-        assert_eq!(restored.field(4).data_type(), &DataType::Timestamp(arrow::datatypes::TimeUnit::Nanosecond, Some("+00:00".into())));
+        assert_eq!(
+            restored.field(3).data_type(),
+            &DataType::Timestamp(arrow::datatypes::TimeUnit::Nanosecond, None)
+        );
+        assert_eq!(
+            restored.field(4).data_type(),
+            &DataType::Timestamp(
+                arrow::datatypes::TimeUnit::Nanosecond,
+                Some("+00:00".into())
+            )
+        );
     }
 
     #[test]
@@ -266,7 +293,13 @@ mod tests {
         let mut column_stats = HashMap::new();
         column_stats.insert(
             "id".to_string(),
-            ColumnStats { null_count: 0, row_count: 100, mean: Some(50.0), min: Some(1.0), max: Some(100.0) },
+            ColumnStats {
+                null_count: 0,
+                row_count: 100,
+                mean: Some(50.0),
+                min: Some(1.0),
+                max: Some(100.0),
+            },
         );
         let mut semantic_types = HashMap::new();
         semantic_types.insert("email".to_string(), SemanticType::Email);
@@ -299,7 +332,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.json");
 
-        let state = ProjectState { schema_version: 1, snapshots: HashMap::new() };
+        let state = ProjectState {
+            schema_version: 1,
+            snapshots: HashMap::new(),
+        };
         state.save(&path).unwrap();
 
         let loaded = ProjectState::load(&path).unwrap();
@@ -330,12 +366,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_capture_snapshot_with_mock_provider() {
+        use crate::{DataProvider, SchemaProvider};
         use arrow::array::{Int32Array, StringArray};
         use arrow::datatypes::{DataType, Field, Schema};
         use arrow::record_batch::RecordBatch;
         use async_trait::async_trait;
         use std::sync::Arc;
-        use crate::{DataProvider, SchemaProvider};
 
         struct Mock {
             schema: Schema,
@@ -344,12 +380,16 @@ mod tests {
 
         #[async_trait]
         impl SchemaProvider for Mock {
-            async fn get_schema(&self, _: &str) -> Result<Schema> { Ok(self.schema.clone()) }
+            async fn get_schema(&self, _: &str) -> Result<Schema> {
+                Ok(self.schema.clone())
+            }
         }
 
         #[async_trait]
         impl DataProvider for Mock {
-            async fn get_data(&self, _: &str) -> Result<Vec<RecordBatch>> { Ok(vec![self.batch.clone()]) }
+            async fn get_data(&self, _: &str) -> Result<Vec<RecordBatch>> {
+                Ok(vec![self.batch.clone()])
+            }
         }
 
         let schema = Schema::new(vec![
@@ -361,7 +401,11 @@ mod tests {
             vec![
                 Arc::new(Int32Array::from(vec![1, 2, 3, 4, 5])),
                 Arc::new(StringArray::from(vec![
-                    Some("a@x.com"), Some("b@x.com"), Some("c@x.com"), Some("d@x.com"), Some("e@x.com"),
+                    Some("a@x.com"),
+                    Some("b@x.com"),
+                    Some("c@x.com"),
+                    Some("d@x.com"),
+                    Some("e@x.com"),
                 ])),
             ],
         )
@@ -377,21 +421,28 @@ mod tests {
 
     #[tokio::test]
     async fn test_capture_snapshot_with_samples() {
+        use crate::{DataProvider, SchemaProvider};
         use arrow::array::Int32Array;
         use arrow::datatypes::{DataType, Field, Schema};
         use arrow::record_batch::RecordBatch;
         use async_trait::async_trait;
         use std::sync::Arc;
-        use crate::{DataProvider, SchemaProvider};
 
-        struct Mock { schema: Schema, batch: RecordBatch }
+        struct Mock {
+            schema: Schema,
+            batch: RecordBatch,
+        }
         #[async_trait]
         impl SchemaProvider for Mock {
-            async fn get_schema(&self, _: &str) -> Result<Schema> { Ok(self.schema.clone()) }
+            async fn get_schema(&self, _: &str) -> Result<Schema> {
+                Ok(self.schema.clone())
+            }
         }
         #[async_trait]
         impl DataProvider for Mock {
-            async fn get_data(&self, _: &str) -> Result<Vec<RecordBatch>> { Ok(vec![self.batch.clone()]) }
+            async fn get_data(&self, _: &str) -> Result<Vec<RecordBatch>> {
+                Ok(vec![self.batch.clone()])
+            }
         }
 
         let schema = Schema::new(vec![Field::new("v", DataType::Int32, false)]);
