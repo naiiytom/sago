@@ -53,3 +53,60 @@ fn test_init_refuses_existing_project() {
         .failure()
         .stderr(predicate::str::contains("already exists"));
 }
+
+const SAMPLE_TOML: &str = r#"
+[project]
+name = "test"
+version = "0.1.0"
+
+[connections.archive]
+type = "s3"
+bucket = "my-data"
+region = "us-east-1"
+
+[targets.events]
+connection = "archive"
+identifier = "events.parquet"
+
+[checks]
+drift_threshold = 0.05
+"#;
+
+#[test]
+fn test_apply_fails_without_sago_toml() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut cmd = Command::cargo_bin("sago").unwrap();
+    cmd.arg("apply")
+        .current_dir(tmp.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Sago.toml not found"));
+}
+
+#[test]
+fn test_apply_fails_with_legacy_schema_block() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("Sago.toml"),
+        r#"
+[project]
+name = "x"
+version = "1"
+
+[schema]
+provider = "p"
+tables = []
+
+[checks]
+drift_threshold = 0.1
+"#,
+    )
+    .unwrap();
+
+    let mut cmd = Command::cargo_bin("sago").unwrap();
+    cmd.arg("apply")
+        .current_dir(tmp.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("[schema]"));
+}
