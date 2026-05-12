@@ -6,7 +6,7 @@ use std::collections::HashMap;
 pub struct Config {
     pub project: ProjectConfig,
     pub connections: HashMap<String, ConnectionConfig>,
-    pub schema: SchemaConfig,
+    pub targets: HashMap<String, TargetConfig>,
     pub checks: ChecksConfig,
 }
 
@@ -26,9 +26,23 @@ pub enum ConnectionConfig {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct SchemaConfig {
-    pub provider: String,
-    pub tables: Vec<String>,
+pub struct TargetConfig {
+    pub connection: String,
+    pub identifier: String,
+    #[serde(default)]
+    pub sample: Option<SampleConfig>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SampleConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_sample_n")]
+    pub n: usize,
+}
+
+fn default_sample_n() -> usize {
+    1000
 }
 
 #[derive(Debug, Deserialize)]
@@ -38,6 +52,11 @@ pub struct ChecksConfig {
 
 impl Config {
     pub fn from_toml(content: &str) -> Result<Self> {
+        if content.contains("[schema]") {
+            return Err(crate::SagoError::Config(
+                "config uses obsolete [schema] block — replace with [targets.<name>] entries; see docs".into(),
+            ));
+        }
         toml::from_str(content).map_err(|e| crate::SagoError::Config(e.to_string()))
     }
 }
@@ -51,18 +70,26 @@ mod tests {
 name = "sago-project"
 version = "0.1.0"
 
-[connections.postgres]
+[connections.warehouse]
 type = "postgres"
 url = "postgres://user:password@localhost/db"
 
-[connections.s3]
+[connections.archive]
 type = "s3"
 bucket = "my-data-bucket"
 region = "us-east-1"
 
-[schema]
-provider = "postgres"
-tables = ["users", "orders"]
+[targets.users]
+connection = "warehouse"
+identifier = "public.users"
+
+[targets.events_2024]
+connection = "archive"
+identifier = "events/2024.parquet"
+
+[targets.events_2024.sample]
+enabled = true
+n = 500
 
 [checks]
 drift_threshold = 0.05
@@ -70,89 +97,115 @@ drift_threshold = 0.05
 
     #[test]
     fn test_valid_full_config() {
-        let config = Config::from_toml(VALID_TOML).unwrap();
-        assert_eq!(config.project.name, "sago-project");
-        assert_eq!(config.project.version, "0.1.0");
-        assert_eq!(config.schema.provider, "postgres");
-        assert_eq!(config.schema.tables, vec!["users", "orders"]);
-        assert_eq!(config.checks.drift_threshold, 0.05);
-        assert!(config.connections.contains_key("postgres"));
-        assert!(config.connections.contains_key("s3"));
+        let cfg = Config::from_toml(VALID_TOML).unwrap();
+        assert_eq!(cfg.project.name, "sago-project");
+        assert_eq!(cfg.targets.len(), 2);
+
+        let users = cfg.targets.get("users").unwrap();
+        assert_eq!(users.connection, "warehouse");
+        assert_eq!(users.identifier, "public.users");
+        assert!(users.sample.is_none());
+
+        let events = cfg.targets.get("events_2024").unwrap();
+        let sample = events.sample.as_ref().unwrap();
+        assert!(sample.enabled);
+        assert_eq!(sample.n, 500);
     }
 
     #[test]
     fn test_postgres_connection_deserialization() {
-        let config = Config::from_toml(VALID_TOML).unwrap();
-        match config.connections.get("postgres").unwrap() {
+        let cfg = Config::from_toml(VALID_TOML).unwrap();
+        match cfg.connections.get("warehouse").unwrap() {
             ConnectionConfig::Postgres { url } => {
                 assert_eq!(url, "postgres://user:password@localhost/db");
             }
-            _ => panic!("Expected Postgres connection"),
+            _ => panic!("expected Postgres"),
         }
     }
 
     #[test]
     fn test_s3_connection_deserialization() {
-        let config = Config::from_toml(VALID_TOML).unwrap();
-        match config.connections.get("s3").unwrap() {
+        let cfg = Config::from_toml(VALID_TOML).unwrap();
+        match cfg.connections.get("archive").unwrap() {
             ConnectionConfig::S3 { bucket, region } => {
                 assert_eq!(bucket, "my-data-bucket");
                 assert_eq!(region, "us-east-1");
             }
-            _ => panic!("Expected S3 connection"),
+            _ => panic!("expected S3"),
         }
     }
 
     #[test]
-    fn test_drift_threshold_value() {
+    fn test_sample_default_n() {
         let toml = r#"
 [project]
 name = "p"
 version = "1"
 
-[connections]
+[connections.c]
+type = "s3"
+bucket = "b"
+region = "r"
+
+[targets.t]
+connection = "c"
+identifier = "x"
+[targets.t.sample]
+enabled = true
+
+[checks]
+drift_threshold = 0.05
+"#;
+        let cfg = Config::from_toml(toml).unwrap();
+        let sample = cfg.targets["t"].sample.as_ref().unwrap();
+        assert!(sample.enabled);
+        assert_eq!(sample.n, 1000); // default
+    }
+
+    #[test]
+    fn test_legacy_schema_block_rejected() {
+        let toml = r#"
+[project]
+name = "p"
+version = "1"
 
 [schema]
 provider = "postgres"
-tables = []
+tables = ["users"]
 
 [checks]
-drift_threshold = 0.1
+drift_threshold = 0.05
 "#;
-        let config = Config::from_toml(toml).unwrap();
-        assert_eq!(config.checks.drift_threshold, 0.1);
+        let err = Config::from_toml(toml).unwrap_err();
+        match err {
+            crate::SagoError::Config(msg) => {
+                assert!(msg.contains("[schema]"));
+                assert!(msg.contains("[targets"));
+            }
+            other => panic!("expected Config error, got {:?}", other),
+        }
     }
 
     #[test]
     fn test_missing_required_field() {
-        // Missing [project] section
         let toml = r#"
-[connections.postgres]
-type = "postgres"
-url = "postgres://localhost/db"
+[connections.c]
+type = "s3"
+bucket = "b"
+region = "r"
 
-[schema]
-provider = "postgres"
-tables = []
+[targets]
 
 [checks]
 drift_threshold = 0.05
 "#;
         let result = Config::from_toml(toml);
         assert!(result.is_err());
-        match result.unwrap_err() {
-            crate::SagoError::Config(_) => {}
-            e => panic!("Expected Config error, got: {:?}", e),
-        }
     }
 
     #[test]
     fn test_invalid_toml_syntax() {
         let result = Config::from_toml("this is not valid toml ][[[");
         assert!(result.is_err());
-        match result.unwrap_err() {
-            crate::SagoError::Config(_) => {}
-            e => panic!("Expected Config error, got: {:?}", e),
-        }
     }
 }
