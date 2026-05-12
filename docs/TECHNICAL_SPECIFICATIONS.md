@@ -22,8 +22,9 @@ Sago is designed as a modular system with a core engine responsible for the heav
   - Drift Detector (`drift` module): Statistical analysis — schema drift, data drift, KS test.
   - Semantic Analyzer (`semantic` module): Infers column semantic types (email, credit card, UUID, etc.).
 - **sago-cli**:
-  - `clap`-based CLI for commands like `init`, `plan`, `apply` (currently stub implementations — Phase 4).
-  - `ratatui`-based TUI for interactive exploration (planned — Phase 4).
+  - `clap`-based CLI for `init`, `apply`, `plan`, `diff` — wired against `sago-core` as of Phase 4A.
+  - State persisted at `.sago/state.json`; plan artifacts at `.sago/plans/<timestamp>.json`.
+  - `ratatui`-based TUI for interactive exploration (planned — Phase 4D).
 - **sago-sdk**:
   - Bindings to `sago-core` functionality (placeholder — Phase 4).
 - **sago-proto**:

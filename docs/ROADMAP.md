@@ -19,7 +19,7 @@
 - [x] **Statistical Drift Detection**: Use advanced algorithms (KS-test, etc.) to detect distribution shifts.
 
 ## Phase 4: Near-Term Work
-- [ ] **CLI Implementation**: Wire `init`, `plan`, and `apply` commands to actual sago-core logic (currently stubs).
+- [x] **CLI Implementation**: `init`, `apply`, `plan`, `diff` wired against `sago-core` (Phase 4A).
 - [ ] **TUI**: Implement `ratatui`-based interactive terminal UI for exploration (workspace dep declared; re-enable in `sago-cli/Cargo.toml` when scaffolding lands).
 - [ ] **PSI Metric**: Implement Population Stability Index alongside the existing KS test for richer distribution drift detection.
 - [ ] **sago-sdk**: Implement real SDK bindings to sago-core (currently placeholder).
