@@ -3,6 +3,10 @@ name = "sago-cli"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "sago"
+path = "src/main.rs"
+
 [dependencies]
 sago-core = { path = "../sago-core" }
 clap.workspace = true
@@ -15,3 +19,8 @@ chrono.workspace = true
 serde = { workspace = true }
 # ratatui dep deferred — re-enable when TUI scaffolding lands (Phase 4).
 # Workspace declaration is kept in /Cargo.toml so other crates can pick it up.
+
+[dev-dependencies]
+assert_cmd.workspace = true
+predicates.workspace = true
+tempfile.workspace = true
