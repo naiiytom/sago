@@ -1,6 +1,5 @@
 use arrow::datatypes::{DataType, Field, Schema};
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 
 use crate::{Result, SagoError};
 
@@ -60,23 +59,23 @@ fn parse_data_type(s: &str) -> Result<DataType> {
         "LargeUtf8" => Ok(DataType::LargeUtf8),
         "Binary" => Ok(DataType::Binary),
         "Date32" => Ok(DataType::Date32),
-        other if other.starts_with("Timestamp(Nanosecond, None)") => {
+        "Timestamp(Nanosecond, None)" => {
             Ok(DataType::Timestamp(arrow::datatypes::TimeUnit::Nanosecond, None))
         }
-        other if other.starts_with("Timestamp(Nanosecond,") => Ok(DataType::Timestamp(
-            arrow::datatypes::TimeUnit::Nanosecond,
-            Some("+00:00".into()),
-        )),
+        other if other.starts_with("Timestamp(Nanosecond, Some(") => {
+            // Extract timezone from debug repr: Timestamp(Nanosecond, Some("tz"))
+            let tz = other
+                .trim_start_matches("Timestamp(Nanosecond, Some(\"")
+                .trim_end_matches("\"))")
+                .to_string();
+            Ok(DataType::Timestamp(arrow::datatypes::TimeUnit::Nanosecond, Some(tz.into())))
+        }
         other => Err(SagoError::Schema(format!(
             "unsupported serialized data type: {}",
             other
         ))),
     }
 }
-
-// Silence unused-Arc warning; will be used in Task 6 once full state types land.
-#[allow(dead_code)]
-fn _arc_marker() -> Arc<u8> { Arc::new(0) }
 
 #[cfg(test)]
 mod tests {
@@ -88,17 +87,21 @@ mod tests {
             Field::new("id", DataType::Int64, false),
             Field::new("email", DataType::Utf8, true),
             Field::new("active", DataType::Boolean, false),
+            Field::new("created_at", DataType::Timestamp(arrow::datatypes::TimeUnit::Nanosecond, None), true),
+            Field::new("updated_at", DataType::Timestamp(arrow::datatypes::TimeUnit::Nanosecond, Some("+00:00".into())), false),
         ]);
         let s: SerializableSchema = (&original).into();
         let json = serde_json::to_string(&s).unwrap();
         let parsed: SerializableSchema = serde_json::from_str(&json).unwrap();
         let restored = parsed.to_arrow_schema().unwrap();
 
-        assert_eq!(restored.fields().len(), 3);
+        assert_eq!(restored.fields().len(), 5);
         assert_eq!(restored.field(0).name(), "id");
         assert_eq!(restored.field(0).data_type(), &DataType::Int64);
         assert_eq!(restored.field(1).data_type(), &DataType::Utf8);
         assert_eq!(restored.field(2).is_nullable(), false);
+        assert_eq!(restored.field(3).data_type(), &DataType::Timestamp(arrow::datatypes::TimeUnit::Nanosecond, None));
+        assert_eq!(restored.field(4).data_type(), &DataType::Timestamp(arrow::datatypes::TimeUnit::Nanosecond, Some("+00:00".into())));
     }
 
     #[test]
