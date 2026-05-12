@@ -136,3 +136,37 @@ fn test_diff_fails_with_unknown_connection() {
         .failure()
         .stderr(predicate::str::contains("unknown connection"));
 }
+
+#[test]
+fn test_full_init_then_help_subcommands() {
+    let tmp = tempfile::tempdir().unwrap();
+
+    // init
+    Command::cargo_bin("sago")
+        .unwrap()
+        .arg("init")
+        .arg("acme")
+        .current_dir(tmp.path())
+        .assert()
+        .success();
+
+    // each subcommand --help still works inside an initialized project
+    for sub in ["apply", "plan", "diff"] {
+        Command::cargo_bin("sago")
+            .unwrap()
+            .arg(sub)
+            .arg("--help")
+            .current_dir(tmp.path())
+            .assert()
+            .success();
+    }
+
+    // re-init should fail loudly
+    Command::cargo_bin("sago")
+        .unwrap()
+        .arg("init")
+        .arg("acme")
+        .current_dir(tmp.path())
+        .assert()
+        .failure();
+}
