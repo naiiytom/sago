@@ -1,4 +1,5 @@
 use assert_cmd::Command;
+use predicates::prelude::*;
 
 #[test]
 fn test_help_lists_all_four_commands() {
@@ -13,4 +14,42 @@ fn test_help_lists_all_four_commands() {
             stdout
         );
     }
+}
+
+#[test]
+fn test_init_creates_skeleton() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut cmd = Command::cargo_bin("sago").unwrap();
+    cmd.arg("init")
+        .arg("my-project")
+        .current_dir(tmp.path())
+        .assert()
+        .success();
+
+    let toml = tmp.path().join("Sago.toml");
+    assert!(toml.exists(), "Sago.toml should be created");
+    let content = std::fs::read_to_string(&toml).unwrap();
+    assert!(content.contains("name = \"my-project\""));
+    assert!(content.contains("[targets"));
+
+    let dir = tmp.path().join(".sago");
+    assert!(dir.is_dir(), ".sago/ should be created");
+    let gitignore = dir.join(".gitignore");
+    assert!(gitignore.exists(), ".sago/.gitignore should be created");
+    let ig = std::fs::read_to_string(&gitignore).unwrap();
+    assert!(ig.contains("plans/"));
+}
+
+#[test]
+fn test_init_refuses_existing_project() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("Sago.toml"), "# already here").unwrap();
+
+    let mut cmd = Command::cargo_bin("sago").unwrap();
+    cmd.arg("init")
+        .arg("my-project")
+        .current_dir(tmp.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("already exists"));
 }
