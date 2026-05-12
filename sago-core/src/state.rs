@@ -4,9 +4,9 @@ use std::path::Path;
 use arrow::datatypes::{DataType, Field, Schema};
 use serde::{Deserialize, Serialize};
 
-use crate::drift::ColumnStats;
-use crate::semantic::SemanticType;
-use crate::{Result, SagoError};
+use crate::drift::{calculate_column_stats, ColumnStats};
+use crate::semantic::{infer_semantic_type, SemanticType};
+use crate::{DataProvider, Result, SagoError};
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
 pub struct SerializableSchema {
@@ -146,6 +146,78 @@ impl ProjectState {
     }
 }
 
+/// Capture a snapshot of `identifier` from `provider`.
+///
+/// `sample_n` is `Some(n)` to retain up to `n` numeric values per numeric column,
+/// `None` to skip sample persistence.
+pub async fn capture_snapshot(
+    provider: std::sync::Arc<dyn DataProvider>,
+    identifier: &str,
+    sample_n: Option<usize>,
+) -> Result<TargetSnapshot> {
+    let batches = provider.get_data(identifier).await?;
+    let schema = if let Some(b) = batches.first() {
+        b.schema().as_ref().clone()
+    } else {
+        provider.get_schema(identifier).await?
+    };
+
+    let mut column_stats = HashMap::new();
+    let mut semantic_types = HashMap::new();
+    for field in schema.fields() {
+        if let Some(stats) = calculate_column_stats(&batches, field.name()) {
+            column_stats.insert(field.name().clone(), stats);
+        }
+        if let Some(b) = batches.first() {
+            if let Some(col) = b.column_by_name(field.name()) {
+                semantic_types.insert(
+                    field.name().clone(),
+                    infer_semantic_type(field.name(), col.as_ref()),
+                );
+            }
+        }
+    }
+
+    let samples = match sample_n {
+        Some(n) if n > 0 => Some(extract_samples(&batches, &schema, n)),
+        _ => None,
+    };
+
+    Ok(TargetSnapshot {
+        captured_at: chrono::Utc::now().to_rfc3339(),
+        schema: SerializableSchema::from(&schema),
+        column_stats,
+        semantic_types,
+        samples,
+    })
+}
+
+fn extract_samples(
+    batches: &[arrow::record_batch::RecordBatch],
+    schema: &Schema,
+    n: usize,
+) -> HashMap<String, Vec<f64>> {
+    use crate::drift::extract_numeric_values_pub;
+    let mut out = HashMap::new();
+    for field in schema.fields() {
+        if matches!(
+            field.data_type(),
+            DataType::Int16
+                | DataType::Int32
+                | DataType::Int64
+                | DataType::Float32
+                | DataType::Float64
+        ) {
+            let mut values = extract_numeric_values_pub(batches, field.name());
+            if values.len() > n {
+                values.truncate(n);
+            }
+            out.insert(field.name().clone(), values);
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -255,5 +327,85 @@ mod tests {
             SagoError::Config(msg) => assert!(msg.contains("schema_version")),
             other => panic!("expected Config error, got {:?}", other),
         }
+    }
+
+    #[tokio::test]
+    async fn test_capture_snapshot_with_mock_provider() {
+        use arrow::array::{Int32Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use arrow::record_batch::RecordBatch;
+        use async_trait::async_trait;
+        use std::sync::Arc;
+        use crate::{DataProvider, SchemaProvider};
+
+        struct Mock {
+            schema: Schema,
+            batch: RecordBatch,
+        }
+
+        #[async_trait]
+        impl SchemaProvider for Mock {
+            async fn get_schema(&self, _: &str) -> Result<Schema> { Ok(self.schema.clone()) }
+        }
+
+        #[async_trait]
+        impl DataProvider for Mock {
+            async fn get_data(&self, _: &str) -> Result<Vec<RecordBatch>> { Ok(vec![self.batch.clone()]) }
+        }
+
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new("email", DataType::Utf8, true),
+        ]);
+        let batch = RecordBatch::try_new(
+            Arc::new(schema.clone()),
+            vec![
+                Arc::new(Int32Array::from(vec![1, 2, 3, 4, 5])),
+                Arc::new(StringArray::from(vec![
+                    Some("a@x.com"), Some("b@x.com"), Some("c@x.com"), Some("d@x.com"), Some("e@x.com"),
+                ])),
+            ],
+        )
+        .unwrap();
+        let provider: Arc<dyn DataProvider> = Arc::new(Mock { schema, batch });
+
+        let snap = capture_snapshot(provider, "tbl", None).await.unwrap();
+        assert_eq!(snap.schema.fields.len(), 2);
+        assert!(snap.column_stats.contains_key("id"));
+        assert_eq!(snap.semantic_types["email"], SemanticType::Email);
+        assert!(snap.samples.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_capture_snapshot_with_samples() {
+        use arrow::array::Int32Array;
+        use arrow::datatypes::{DataType, Field, Schema};
+        use arrow::record_batch::RecordBatch;
+        use async_trait::async_trait;
+        use std::sync::Arc;
+        use crate::{DataProvider, SchemaProvider};
+
+        struct Mock { schema: Schema, batch: RecordBatch }
+        #[async_trait]
+        impl SchemaProvider for Mock {
+            async fn get_schema(&self, _: &str) -> Result<Schema> { Ok(self.schema.clone()) }
+        }
+        #[async_trait]
+        impl DataProvider for Mock {
+            async fn get_data(&self, _: &str) -> Result<Vec<RecordBatch>> { Ok(vec![self.batch.clone()]) }
+        }
+
+        let schema = Schema::new(vec![Field::new("v", DataType::Int32, false)]);
+        let batch = RecordBatch::try_new(
+            Arc::new(schema.clone()),
+            vec![Arc::new(Int32Array::from((0..10).collect::<Vec<i32>>()))],
+        )
+        .unwrap();
+        let provider: Arc<dyn DataProvider> = Arc::new(Mock { schema, batch });
+
+        let snap = capture_snapshot(provider, "tbl", Some(5)).await.unwrap();
+        let samples = snap.samples.unwrap();
+        assert!(samples.contains_key("v"));
+        assert_eq!(samples["v"].len(), 5);
     }
 }

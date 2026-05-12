@@ -367,6 +367,10 @@ fn extract_numeric_values(batches: &[RecordBatch], column_name: &str) -> Vec<f64
     values
 }
 
+pub fn extract_numeric_values_pub(batches: &[RecordBatch], column_name: &str) -> Vec<f64> {
+    extract_numeric_values(batches, column_name)
+}
+
 fn calculate_ks_test(
     source_batches: &[RecordBatch],
     target_batches: &[RecordBatch],
