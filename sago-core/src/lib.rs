@@ -25,11 +25,13 @@ pub enum SagoError {
 }
 
 pub mod config;
+pub mod connection;
 pub mod diff;
 pub mod drift;
 pub mod postgres;
 pub mod s3;
 pub mod semantic;
+pub mod state;
 
 pub type Result<T> = std::result::Result<T, SagoError>;
 

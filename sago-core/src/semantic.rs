@@ -1,9 +1,9 @@
 use arrow::array::{Array, StringArray};
 use arrow::datatypes::DataType;
 use regex::Regex;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Serialize, PartialEq, Clone)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
 pub enum SemanticType {
     Email,
     CreditCard,
@@ -321,5 +321,24 @@ mod tests {
             infer_semantic_type("unknown_col", &array),
             SemanticType::Unknown
         );
+    }
+
+    // ── SemanticType round-trip (JSON serialization) ──────────────────────────
+
+    #[test]
+    fn test_semantic_type_json_round_trip() {
+        for v in [
+            SemanticType::Email,
+            SemanticType::CreditCard,
+            SemanticType::PhoneNumber,
+            SemanticType::UUID,
+            SemanticType::IPAddress,
+            SemanticType::Url,
+            SemanticType::Unknown,
+        ] {
+            let json = serde_json::to_string(&v).unwrap();
+            let back: SemanticType = serde_json::from_str(&json).unwrap();
+            assert_eq!(v, back);
+        }
     }
 }

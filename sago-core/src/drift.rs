@@ -2,10 +2,10 @@ use crate::semantic::{SemanticType, infer_semantic_type};
 use arrow::array::{Array, Float32Array, Float64Array, Int16Array, Int32Array, Int64Array};
 use arrow::datatypes::{DataType, Schema};
 use arrow::record_batch::RecordBatch;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
-#[derive(Debug, Serialize, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
 pub struct SchemaDrift {
     pub added_fields: Vec<String>,
     pub removed_fields: Vec<String>,
@@ -13,21 +13,21 @@ pub struct SchemaDrift {
     pub semantic_drifts: Vec<SemanticDrift>,
 }
 
-#[derive(Debug, Serialize, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
 pub struct SemanticDrift {
     pub field_name: String,
     pub source_type: SemanticType,
     pub target_type: SemanticType,
 }
 
-#[derive(Debug, Serialize, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
 pub struct TypeChange {
     pub field_name: String,
     pub old_type: String,
     pub new_type: String,
 }
 
-#[derive(Debug, Serialize, PartialEq, Clone)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
 pub struct ColumnStats {
     pub null_count: usize,
     pub row_count: usize,
@@ -36,12 +36,12 @@ pub struct ColumnStats {
     pub max: Option<f64>,
 }
 
-#[derive(Debug, Serialize, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
 pub struct DataDrift {
     pub column_drifts: HashMap<String, ColumnDrift>,
 }
 
-#[derive(Debug, Serialize, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
 pub struct ColumnDrift {
     pub source_stats: ColumnStats,
     pub target_stats: ColumnStats,
@@ -215,6 +215,43 @@ pub fn calculate_column_stats(batches: &[RecordBatch], column_name: &str) -> Opt
     })
 }
 
+pub fn detect_data_drift_from_stats(
+    source: &HashMap<String, ColumnStats>,
+    target: &HashMap<String, ColumnStats>,
+) -> DataDrift {
+    let mut column_drifts = HashMap::new();
+
+    let source_keys: HashSet<&String> = source.keys().collect();
+    let target_keys: HashSet<&String> = target.keys().collect();
+
+    for field_name in source_keys.intersection(&target_keys) {
+        let source_stats = source.get(*field_name).unwrap().clone();
+        let target_stats = target.get(*field_name).unwrap().clone();
+
+        let mean_drift = if let (Some(s), Some(t)) = (source_stats.mean, target_stats.mean) {
+            Some((t - s).abs())
+        } else {
+            None
+        };
+
+        let null_count_drift = target_stats.null_count as i64 - source_stats.null_count as i64;
+
+        column_drifts.insert(
+            (*field_name).clone(),
+            ColumnDrift {
+                source_stats,
+                target_stats,
+                mean_drift,
+                null_count_drift,
+                ks_statistic: None,
+                ks_p_value: None,
+            },
+        );
+    }
+
+    DataDrift { column_drifts }
+}
+
 pub fn detect_data_drift(
     source_batches: &[RecordBatch],
     target_batches: &[RecordBatch],
@@ -276,7 +313,7 @@ pub fn detect_data_drift(
     DataDrift { column_drifts }
 }
 
-fn extract_numeric_values(batches: &[RecordBatch], column_name: &str) -> Vec<f64> {
+pub(crate) fn extract_numeric_values(batches: &[RecordBatch], column_name: &str) -> Vec<f64> {
     let mut values = Vec::new();
     for batch in batches {
         if let Some(column) = batch.column_by_name(column_name) {
@@ -643,5 +680,71 @@ mod tests {
         assert_eq!(result[0].field_name, "contact");
         assert_eq!(result[0].source_type, SemanticType::Email);
         assert_eq!(result[0].target_type, SemanticType::Unknown);
+    }
+
+    // ── ColumnStats round-trip (JSON serialization) ──────────────────────────
+
+    #[test]
+    fn test_column_stats_json_round_trip() {
+        let stats = ColumnStats {
+            null_count: 3,
+            row_count: 10,
+            mean: Some(4.2),
+            min: Some(0.0),
+            max: Some(10.0),
+        };
+        let json = serde_json::to_string(&stats).unwrap();
+        let back: ColumnStats = serde_json::from_str(&json).unwrap();
+        assert_eq!(stats, back);
+    }
+
+    // ── detect_data_drift_from_stats ─────────────────────────────────────────
+
+    #[test]
+    fn test_detect_data_drift_from_stats() {
+        use std::collections::HashMap;
+
+        let mut source = HashMap::new();
+        source.insert(
+            "score".to_string(),
+            ColumnStats {
+                null_count: 0,
+                row_count: 100,
+                mean: Some(50.0),
+                min: Some(0.0),
+                max: Some(100.0),
+            },
+        );
+        source.insert(
+            "extra".to_string(),
+            ColumnStats {
+                null_count: 0,
+                row_count: 100,
+                mean: Some(1.0),
+                min: Some(1.0),
+                max: Some(1.0),
+            },
+        );
+
+        let mut target = HashMap::new();
+        target.insert(
+            "score".to_string(),
+            ColumnStats {
+                null_count: 5,
+                row_count: 100,
+                mean: Some(60.0),
+                min: Some(0.0),
+                max: Some(100.0),
+            },
+        );
+        // 'extra' missing from target — should be skipped (intersection only)
+
+        let drift = detect_data_drift_from_stats(&source, &target);
+        assert_eq!(drift.column_drifts.len(), 1);
+        let score = drift.column_drifts.get("score").unwrap();
+        assert_eq!(score.mean_drift, Some(10.0));
+        assert_eq!(score.null_count_drift, 5);
+        assert_eq!(score.ks_statistic, None);
+        assert_eq!(score.ks_p_value, None);
     }
 }

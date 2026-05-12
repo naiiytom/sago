@@ -1,6 +1,11 @@
 use clap::{Parser, Subcommand};
-use tracing::{Level, info};
+use tracing::Level;
 use tracing_subscriber::FmtSubscriber;
+
+mod commands;
+mod report;
+
+use commands::{apply::ApplyArgs, diff::DiffArgs, init::InitArgs, plan::PlanArgs};
 
 #[derive(Parser)]
 #[command(name = "sago")]
@@ -17,40 +22,27 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Initialize a new Sago project
-    Init {
-        /// Name of the project
-        name: String,
-    },
-    /// Show the execution plan
-    Plan,
-    /// Apply changes to the data infrastructure
-    Apply,
+    Init(InitArgs),
+    /// Snapshot live data into the baseline
+    Apply(ApplyArgs),
+    /// Show drift since the last apply
+    Plan(PlanArgs),
+    /// One-shot cross-modal comparison of two sources
+    Diff(DiffArgs),
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-
     let subscriber = FmtSubscriber::builder()
         .with_max_level(cli.log_level)
         .finish();
-
-    tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
+    tracing::subscriber::set_global_default(subscriber).expect("setting subscriber failed");
 
     match &cli.command {
-        Commands::Init { name } => {
-            info!("Initializing project: {}", name);
-            // TODO: Create initial Sago.toml
-        }
-        Commands::Plan => {
-            info!("Planning execution...");
-            // TODO: Parse config and detect drift
-        }
-        Commands::Apply => {
-            info!("Applying changes...");
-            // TODO: Execute plan
-        }
+        Commands::Init(a) => commands::init::run(a).await,
+        Commands::Apply(a) => commands::apply::run(a).await,
+        Commands::Plan(a) => commands::plan::run(a).await,
+        Commands::Diff(a) => commands::diff::run(a).await,
     }
-
-    Ok(())
 }
