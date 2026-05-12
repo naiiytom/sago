@@ -4,7 +4,7 @@ use std::path::Path;
 use arrow::datatypes::{DataType, Field, Schema};
 use serde::{Deserialize, Serialize};
 
-use crate::drift::{calculate_column_stats, ColumnStats};
+use crate::drift::{calculate_column_stats, extract_numeric_values, ColumnStats};
 use crate::semantic::{infer_semantic_type, SemanticType};
 use crate::{DataProvider, Result, SagoError};
 
@@ -168,13 +168,13 @@ pub async fn capture_snapshot(
         if let Some(stats) = calculate_column_stats(&batches, field.name()) {
             column_stats.insert(field.name().clone(), stats);
         }
-        if let Some(b) = batches.first() {
-            if let Some(col) = b.column_by_name(field.name()) {
-                semantic_types.insert(
-                    field.name().clone(),
-                    infer_semantic_type(field.name(), col.as_ref()),
-                );
-            }
+        if let Some(b) = batches.first()
+            && let Some(col) = b.column_by_name(field.name())
+        {
+            semantic_types.insert(
+                field.name().clone(),
+                infer_semantic_type(field.name(), col.as_ref()),
+            );
         }
     }
 
@@ -197,7 +197,6 @@ fn extract_samples(
     schema: &Schema,
     n: usize,
 ) -> HashMap<String, Vec<f64>> {
-    use crate::drift::extract_numeric_values_pub;
     let mut out = HashMap::new();
     for field in schema.fields() {
         if matches!(
@@ -208,7 +207,7 @@ fn extract_samples(
                 | DataType::Float32
                 | DataType::Float64
         ) {
-            let mut values = extract_numeric_values_pub(batches, field.name());
+            let mut values = extract_numeric_values(batches, field.name());
             if values.len() > n {
                 values.truncate(n);
             }

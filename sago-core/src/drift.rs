@@ -315,7 +315,7 @@ pub fn detect_data_drift(
     DataDrift { column_drifts }
 }
 
-fn extract_numeric_values(batches: &[RecordBatch], column_name: &str) -> Vec<f64> {
+pub(crate) fn extract_numeric_values(batches: &[RecordBatch], column_name: &str) -> Vec<f64> {
     let mut values = Vec::new();
     for batch in batches {
         if let Some(column) = batch.column_by_name(column_name) {
@@ -365,10 +365,6 @@ fn extract_numeric_values(batches: &[RecordBatch], column_name: &str) -> Vec<f64
         }
     }
     values
-}
-
-pub fn extract_numeric_values_pub(batches: &[RecordBatch], column_name: &str) -> Vec<f64> {
-    extract_numeric_values(batches, column_name)
 }
 
 fn calculate_ks_test(
