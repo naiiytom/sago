@@ -1,6 +1,11 @@
+use std::collections::HashMap;
+use std::path::Path;
+
 use arrow::datatypes::{DataType, Field, Schema};
 use serde::{Deserialize, Serialize};
 
+use crate::drift::ColumnStats;
+use crate::semantic::SemanticType;
 use crate::{Result, SagoError};
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
@@ -77,6 +82,56 @@ fn parse_data_type(s: &str) -> Result<DataType> {
     }
 }
 
+const CURRENT_SCHEMA_VERSION: u32 = 1;
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
+pub struct ProjectState {
+    pub schema_version: u32,
+    pub snapshots: HashMap<String, TargetSnapshot>,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
+pub struct TargetSnapshot {
+    pub captured_at: String,
+    pub schema: SerializableSchema,
+    pub column_stats: HashMap<String, ColumnStats>,
+    pub semantic_types: HashMap<String, SemanticType>,
+    pub samples: Option<HashMap<String, Vec<f64>>>,
+}
+
+impl ProjectState {
+    pub fn empty() -> Self {
+        ProjectState { schema_version: CURRENT_SCHEMA_VERSION, snapshots: HashMap::new() }
+    }
+
+    pub fn load(path: &Path) -> Result<Self> {
+        let bytes = std::fs::read(path).map_err(SagoError::Io)?;
+        let state: ProjectState =
+            serde_json::from_slice(&bytes).map_err(|e| SagoError::Config(e.to_string()))?;
+        if state.schema_version != CURRENT_SCHEMA_VERSION {
+            return Err(SagoError::Config(format!(
+                "unsupported state schema_version: {} (expected {})",
+                state.schema_version, CURRENT_SCHEMA_VERSION
+            )));
+        }
+        Ok(state)
+    }
+
+    pub fn load_or_default(path: &Path) -> Result<Self> {
+        if path.exists() { Self::load(path) } else { Ok(Self::empty()) }
+    }
+
+    pub fn save(&self, path: &Path) -> Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(SagoError::Io)?;
+        }
+        let json = serde_json::to_string_pretty(self)
+            .map_err(|e| SagoError::Config(e.to_string()))?;
+        std::fs::write(path, json).map_err(SagoError::Io)?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -117,6 +172,79 @@ mod tests {
         match err {
             SagoError::Schema(msg) => assert!(msg.contains("unsupported")),
             other => panic!("expected Schema error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_project_state_round_trip() {
+        use std::collections::HashMap;
+        use crate::drift::ColumnStats;
+        use crate::semantic::SemanticType;
+
+        let mut snapshots = HashMap::new();
+        let mut column_stats = HashMap::new();
+        column_stats.insert(
+            "id".to_string(),
+            ColumnStats { null_count: 0, row_count: 100, mean: Some(50.0), min: Some(1.0), max: Some(100.0) },
+        );
+        let mut semantic_types = HashMap::new();
+        semantic_types.insert("email".to_string(), SemanticType::Email);
+
+        snapshots.insert(
+            "users".to_string(),
+            TargetSnapshot {
+                captured_at: "2026-05-09T14:00:00Z".into(),
+                schema: SerializableSchema { fields: vec![] },
+                column_stats,
+                semantic_types,
+                samples: None,
+            },
+        );
+
+        let state = ProjectState {
+            schema_version: 1,
+            snapshots,
+        };
+
+        let json = serde_json::to_string_pretty(&state).unwrap();
+        let back: ProjectState = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.schema_version, 1);
+        assert_eq!(back.snapshots.len(), 1);
+        assert_eq!(back.snapshots["users"].captured_at, "2026-05-09T14:00:00Z");
+    }
+
+    #[test]
+    fn test_load_save_via_tempdir() {
+        use std::collections::HashMap;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+
+        let state = ProjectState { schema_version: 1, snapshots: HashMap::new() };
+        state.save(&path).unwrap();
+
+        let loaded = ProjectState::load(&path).unwrap();
+        assert_eq!(loaded.schema_version, 1);
+        assert!(loaded.snapshots.is_empty());
+    }
+
+    #[test]
+    fn test_load_missing_file_returns_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nope.json");
+        let state = ProjectState::load_or_default(&path).unwrap();
+        assert_eq!(state.schema_version, 1);
+        assert!(state.snapshots.is_empty());
+    }
+
+    #[test]
+    fn test_load_unknown_schema_version_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        std::fs::write(&path, r#"{"schema_version": 99, "snapshots": {}}"#).unwrap();
+        let err = ProjectState::load(&path).unwrap_err();
+        match err {
+            SagoError::Config(msg) => assert!(msg.contains("schema_version")),
+            other => panic!("expected Config error, got {:?}", other),
         }
     }
 }

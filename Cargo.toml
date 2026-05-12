@@ -29,3 +29,4 @@ tonic-build = "0.14"
 ratatui = "0.29"
 serde_json = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
+tempfile = "3.10"
