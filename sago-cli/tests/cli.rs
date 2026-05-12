@@ -122,3 +122,17 @@ fn test_plan_fails_without_state() {
         .failure()
         .stderr(predicate::str::contains("apply").or(predicate::str::contains("state")));
 }
+
+#[test]
+fn test_diff_fails_with_unknown_connection() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("Sago.toml"), SAMPLE_TOML).unwrap();
+    let mut cmd = Command::cargo_bin("sago").unwrap();
+    cmd.arg("diff")
+        .arg("nope:foo")
+        .arg("archive:bar.parquet")
+        .current_dir(tmp.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unknown connection"));
+}

@@ -6,7 +6,7 @@ use crate::{DataProvider, Result};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
 pub struct DiffReport {
     pub source_identifier: String,
     pub target_identifier: String,

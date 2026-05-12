@@ -5,7 +5,7 @@ use arrow::record_batch::RecordBatch;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
 pub struct SchemaDrift {
     pub added_fields: Vec<String>,
     pub removed_fields: Vec<String>,
@@ -13,14 +13,14 @@ pub struct SchemaDrift {
     pub semantic_drifts: Vec<SemanticDrift>,
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
 pub struct SemanticDrift {
     pub field_name: String,
     pub source_type: SemanticType,
     pub target_type: SemanticType,
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
 pub struct TypeChange {
     pub field_name: String,
     pub old_type: String,
@@ -36,12 +36,12 @@ pub struct ColumnStats {
     pub max: Option<f64>,
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
 pub struct DataDrift {
     pub column_drifts: HashMap<String, ColumnDrift>,
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
 pub struct ColumnDrift {
     pub source_stats: ColumnStats,
     pub target_stats: ColumnStats,
