@@ -17,6 +17,7 @@ tracing-subscriber.workspace = true
 serde_json.workspace = true
 chrono.workspace = true
 serde = { workspace = true }
+colored = "2.1"
 # ratatui dep deferred — re-enable when TUI scaffolding lands (Phase 4).
 # Workspace declaration is kept in /Cargo.toml so other crates can pick it up.
 

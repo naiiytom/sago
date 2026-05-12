@@ -3,10 +3,10 @@ use crate::drift::{
     detect_semantic_drift,
 };
 use crate::{DataProvider, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-#[derive(Debug, Serialize, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
 pub struct DiffReport {
     pub source_identifier: String,
     pub target_identifier: String,
