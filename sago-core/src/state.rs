@@ -118,7 +118,21 @@ impl ProjectState {
     }
 
     pub fn load_or_default(path: &Path) -> Result<Self> {
-        if path.exists() { Self::load(path) } else { Ok(Self::empty()) }
+        match std::fs::read(path) {
+            Ok(bytes) => {
+                let state: ProjectState = serde_json::from_slice(&bytes)
+                    .map_err(|e| SagoError::Config(e.to_string()))?;
+                if state.schema_version != CURRENT_SCHEMA_VERSION {
+                    return Err(SagoError::Config(format!(
+                        "unsupported state schema_version: {} (expected {})",
+                        state.schema_version, CURRENT_SCHEMA_VERSION
+                    )));
+                }
+                Ok(state)
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::empty()),
+            Err(e) => Err(SagoError::Io(e)),
+        }
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
@@ -177,10 +191,6 @@ mod tests {
 
     #[test]
     fn test_project_state_round_trip() {
-        use std::collections::HashMap;
-        use crate::drift::ColumnStats;
-        use crate::semantic::SemanticType;
-
         let mut snapshots = HashMap::new();
         let mut column_stats = HashMap::new();
         column_stats.insert(
@@ -215,7 +225,6 @@ mod tests {
 
     #[test]
     fn test_load_save_via_tempdir() {
-        use std::collections::HashMap;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.json");
 
