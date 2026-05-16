@@ -89,7 +89,7 @@ pub async fn run(args: &PlanArgs) -> Result<()> {
     Ok(())
 }
 
-fn compute_semantic_drift(
+pub(crate) fn compute_semantic_drift(
     baseline: &HashMap<String, SemanticType>,
     live: &HashMap<String, SemanticType>,
 ) -> Vec<SemanticDrift> {
@@ -116,4 +116,76 @@ fn load_config(path: &Path) -> Result<Config> {
         )
     })?;
     Ok(Config::from_toml(&content)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sago_core::semantic::SemanticType;
+
+    #[test]
+    fn test_compute_semantic_drift_empty_maps() {
+        let result = compute_semantic_drift(&HashMap::new(), &HashMap::new());
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_compute_semantic_drift_identical_types_no_drift() {
+        let mut baseline = HashMap::new();
+        baseline.insert("email".into(), SemanticType::Email);
+        baseline.insert("id".into(), SemanticType::UUID);
+
+        let live = baseline.clone();
+        let result = compute_semantic_drift(&baseline, &live);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_compute_semantic_drift_detects_change() {
+        let mut baseline = HashMap::new();
+        baseline.insert("contact".into(), SemanticType::Email);
+
+        let mut live = HashMap::new();
+        live.insert("contact".into(), SemanticType::Unknown);
+
+        let result = compute_semantic_drift(&baseline, &live);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].field_name, "contact");
+        assert_eq!(result[0].source_type, SemanticType::Email);
+        assert_eq!(result[0].target_type, SemanticType::Unknown);
+    }
+
+    #[test]
+    fn test_compute_semantic_drift_detects_multiple_changes() {
+        let mut baseline = HashMap::new();
+        baseline.insert("a".into(), SemanticType::Email);
+        baseline.insert("b".into(), SemanticType::UUID);
+        baseline.insert("c".into(), SemanticType::PhoneNumber);
+
+        let mut live = HashMap::new();
+        live.insert("a".into(), SemanticType::Unknown);
+        live.insert("b".into(), SemanticType::UUID); // unchanged
+        live.insert("c".into(), SemanticType::Unknown);
+
+        let result = compute_semantic_drift(&baseline, &live);
+        assert_eq!(result.len(), 2);
+        let names: Vec<&str> = result.iter().map(|d| d.field_name.as_str()).collect();
+        assert!(names.contains(&"a"));
+        assert!(names.contains(&"c"));
+        assert!(!names.contains(&"b"));
+    }
+
+    #[test]
+    fn test_compute_semantic_drift_field_absent_in_live_is_ignored() {
+        let mut baseline = HashMap::new();
+        baseline.insert("email".into(), SemanticType::Email);
+        baseline.insert("dropped".into(), SemanticType::UUID);
+
+        let mut live = HashMap::new();
+        live.insert("email".into(), SemanticType::Email);
+        // "dropped" is absent from live
+
+        let result = compute_semantic_drift(&baseline, &live);
+        assert!(result.is_empty());
+    }
 }

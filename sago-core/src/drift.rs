@@ -741,6 +741,93 @@ mod tests {
         assert_eq!(result[0].target_type, SemanticType::Unknown);
     }
 
+    // ── extract_numeric_values ───────────────────────────────────────────────
+
+    #[test]
+    fn test_extract_numeric_values_int32() {
+        let batch = int32_batch("v", vec![Some(10), None, Some(30)]);
+        let vals = extract_numeric_values(&[batch], "v");
+        assert_eq!(vals, vec![10.0, 30.0]);
+    }
+
+    #[test]
+    fn test_extract_numeric_values_float64() {
+        let batch = f64_batch("v", vec![Some(1.5), Some(2.5)]);
+        let vals = extract_numeric_values(&[batch], "v");
+        assert_eq!(vals, vec![1.5, 2.5]);
+    }
+
+    #[test]
+    fn test_extract_numeric_values_non_numeric_returns_empty() {
+        let batch = str_batch("v", vec![Some("a"), Some("b")]);
+        let vals = extract_numeric_values(&[batch], "v");
+        assert!(vals.is_empty());
+    }
+
+    #[test]
+    fn test_extract_numeric_values_missing_column_returns_empty() {
+        let batch = int32_batch("v", vec![Some(1)]);
+        let vals = extract_numeric_values(&[batch], "other");
+        assert!(vals.is_empty());
+    }
+
+    #[test]
+    fn test_extract_numeric_values_multiple_batches_concatenated() {
+        let b1 = int32_batch("v", vec![Some(1), Some(2)]);
+        let b2 = int32_batch("v", vec![Some(3), Some(4)]);
+        let vals = extract_numeric_values(&[b1, b2], "v");
+        assert_eq!(vals, vec![1.0, 2.0, 3.0, 4.0]);
+    }
+
+    // ── calculate_ks_test (via detect_data_drift) ────────────────────────────
+
+    #[test]
+    fn test_ks_p_value_is_in_valid_range() {
+        let b1 = int32_batch("v", vec![Some(1), Some(2), Some(3), Some(4), Some(5)]);
+        let b2 = int32_batch("v", vec![Some(10), Some(20), Some(30), Some(40), Some(50)]);
+        let drift = detect_data_drift(&[b1], &[b2]);
+        let col = drift.column_drifts.get("v").unwrap();
+        let p = col.ks_p_value.unwrap();
+        assert!((0.0..=1.0).contains(&p), "p-value {p} outside [0, 1]");
+    }
+
+    #[test]
+    fn test_ks_partial_overlap_statistic_between_0_and_1() {
+        // Two distributions with partial overlap
+        let b1 = int32_batch("v", vec![Some(1), Some(2), Some(3), Some(4), Some(5)]);
+        let b2 = int32_batch("v", vec![Some(3), Some(4), Some(5), Some(6), Some(7)]);
+        let drift = detect_data_drift(&[b1], &[b2]);
+        let col = drift.column_drifts.get("v").unwrap();
+        let ks = col.ks_statistic.unwrap();
+        assert!(ks > 0.0 && ks < 1.0, "partial overlap ks={ks} should be in (0, 1)");
+    }
+
+    #[test]
+    fn test_ks_single_value_each_produces_result() {
+        let b1 = int32_batch("v", vec![Some(1)]);
+        let b2 = int32_batch("v", vec![Some(2)]);
+        let drift = detect_data_drift(&[b1], &[b2]);
+        let col = drift.column_drifts.get("v").unwrap();
+        assert!(col.ks_statistic.is_some());
+        assert!(col.ks_p_value.is_some());
+    }
+
+    #[test]
+    fn test_ks_empty_source_yields_none() {
+        let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Int32, true)]));
+        let empty = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(Int32Array::from(Vec::<Option<i32>>::new()))],
+        )
+        .unwrap();
+        let non_empty = int32_batch("v", vec![Some(1), Some(2)]);
+        let drift = detect_data_drift(&[empty], &[non_empty]);
+        let col = drift.column_drifts.get("v").unwrap();
+        // All values are null/absent → ks undefined
+        assert_eq!(col.ks_statistic, None);
+        assert_eq!(col.ks_p_value, None);
+    }
+
     // ── ColumnStats round-trip (JSON serialization) ──────────────────────────
 
     #[test]
