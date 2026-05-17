@@ -20,11 +20,11 @@
 
 ## Phase 4: Near-Term Work
 - [x] **CLI Implementation**: `init`, `apply`, `plan`, `diff` wired against `sago-core` (Phase 4A).
-- [ ] **TUI**: Implement `ratatui`-based interactive terminal UI for exploration (workspace dep declared; re-enable in `sago-cli/Cargo.toml` when scaffolding lands).
-- [ ] **PSI Metric**: Implement Population Stability Index alongside the existing KS test for richer distribution drift detection.
-- [ ] **sago-sdk**: Implement real SDK bindings to sago-core (currently placeholder).
-- [ ] **sago-proto**: Define `.proto` files and gRPC service definitions (currently placeholder, no proto files).
-- [ ] **Additional S3 Formats**: Support CSV and JSON in addition to Parquet.
+- [x] **PSI Metric**: Population Stability Index added alongside KS test in `detect_data_drift` (Phase 4B).
+- [x] **Additional S3 Formats**: CSV and NDJSON support added to `S3SchemaProvider` with extension-based auto-detection and optional `format` override in config (Phase 4C).
+- [x] **TUI**: `sago explore` subcommand with ratatui list/detail UI, keyboard navigation, and `TestBackend`-based unit tests (Phase 4D).
+- [x] **sago-sdk**: `SagoClient` with `snapshot` method and `diff` free function; re-exports all core types (Phase 4E).
+- [ ] **sago-proto**: Define `.proto` files and gRPC service definitions — blocked on `protoc` installation.
 
 ## Phase 5: Future Directions
 - [ ] **Semantic Smart Renaming**: Intelligently handle column renames without breaking pipelines.

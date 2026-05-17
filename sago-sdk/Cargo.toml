@@ -5,7 +5,11 @@ edition = "2024"
 
 [dependencies]
 sago-core = { path = "../sago-core" }
-sago-proto = { path = "../sago-proto" }
 async-trait.workspace = true
 arrow.workspace = true
 tokio.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

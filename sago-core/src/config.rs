@@ -16,13 +16,26 @@ pub struct ProjectConfig {
     pub version: String,
 }
 
+#[derive(Debug, Deserialize, PartialEq, Clone)]
+#[serde(rename_all = "lowercase")]
+pub enum S3Format {
+    Parquet,
+    Csv,
+    Json,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
 pub enum ConnectionConfig {
     #[serde(rename = "postgres")]
     Postgres { url: String },
     #[serde(rename = "s3")]
-    S3 { bucket: String, region: String },
+    S3 {
+        bucket: String,
+        region: String,
+        #[serde(default)]
+        format: Option<S3Format>,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -127,7 +140,7 @@ drift_threshold = 0.05
     fn test_s3_connection_deserialization() {
         let cfg = Config::from_toml(VALID_TOML).unwrap();
         match cfg.connections.get("archive").unwrap() {
-            ConnectionConfig::S3 { bucket, region } => {
+            ConnectionConfig::S3 { bucket, region, .. } => {
                 assert_eq!(bucket, "my-data-bucket");
                 assert_eq!(region, "us-east-1");
             }
@@ -207,5 +220,60 @@ drift_threshold = 0.05
     fn test_invalid_toml_syntax() {
         let result = Config::from_toml("this is not valid toml ][[[");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_s3_format_override_in_config() {
+        let toml = r#"
+[project]
+name = "p"
+version = "1"
+
+[connections.archive]
+type = "s3"
+bucket = "my-bucket"
+region = "us-east-1"
+format = "csv"
+
+[targets.t]
+connection = "archive"
+identifier = "data/export.csv"
+
+[checks]
+drift_threshold = 0.05
+"#;
+        let cfg = Config::from_toml(toml).unwrap();
+        match cfg.connections.get("archive").unwrap() {
+            ConnectionConfig::S3 { format, .. } => {
+                assert_eq!(*format, Some(S3Format::Csv));
+            }
+            _ => panic!("expected S3"),
+        }
+    }
+
+    #[test]
+    fn test_s3_format_defaults_to_none() {
+        let toml = r#"
+[project]
+name = "p"
+version = "1"
+
+[connections.archive]
+type = "s3"
+bucket = "b"
+region = "r"
+
+[targets.t]
+connection = "archive"
+identifier = "data/file.parquet"
+
+[checks]
+drift_threshold = 0.05
+"#;
+        let cfg = Config::from_toml(toml).unwrap();
+        match cfg.connections.get("archive").unwrap() {
+            ConnectionConfig::S3 { format, .. } => assert!(format.is_none()),
+            _ => panic!("expected S3"),
+        }
     }
 }

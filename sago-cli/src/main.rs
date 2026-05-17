@@ -29,6 +29,8 @@ enum Commands {
     Plan(PlanArgs),
     /// One-shot cross-modal comparison of two sources
     Diff(DiffArgs),
+    /// Launch interactive terminal explorer
+    Explore,
 }
 
 #[tokio::main]
@@ -44,5 +46,6 @@ async fn main() -> anyhow::Result<()> {
         Commands::Apply(a) => commands::apply::run(a).await,
         Commands::Plan(a) => commands::plan::run(a).await,
         Commands::Diff(a) => commands::diff::run(a).await,
+        Commands::Explore => Ok(commands::explore::run()?),
     }
 }

@@ -13,8 +13,12 @@ pub async fn build_provider(cfg: &ConnectionConfig) -> Result<Arc<dyn DataProvid
                 .map_err(SagoError::Database)?;
             Ok(Arc::new(crate::postgres::PostgresSchemaProvider::new(pool)))
         }
-        ConnectionConfig::S3 { bucket, region } => {
-            let p = S3SchemaProvider::new(bucket, region)?;
+        ConnectionConfig::S3 {
+            bucket,
+            region,
+            format,
+        } => {
+            let p = S3SchemaProvider::new(bucket, region)?.with_format(format.clone());
             Ok(Arc::new(p))
         }
     }
@@ -29,6 +33,7 @@ mod tests {
         let cfg = ConnectionConfig::S3 {
             bucket: "test-bucket".into(),
             region: "us-east-1".into(),
+            format: None,
         };
         let p = build_provider(&cfg).await;
         assert!(p.is_ok());
