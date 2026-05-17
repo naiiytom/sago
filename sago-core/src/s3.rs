@@ -1,3 +1,4 @@
+use crate::config::S3Format;
 use crate::{DataProvider, Result, SagoError, SchemaProvider};
 use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
@@ -8,8 +9,33 @@ use object_store::{ObjectStore, path::Path};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use std::sync::Arc;
 
+enum S3FormatResolved {
+    Parquet,
+    Csv,
+    Json,
+}
+
+fn detect_format(override_format: Option<&S3Format>, identifier: &str) -> S3FormatResolved {
+    if let Some(fmt) = override_format {
+        return match fmt {
+            S3Format::Parquet => S3FormatResolved::Parquet,
+            S3Format::Csv => S3FormatResolved::Csv,
+            S3Format::Json => S3FormatResolved::Json,
+        };
+    }
+    let lower = identifier.to_lowercase();
+    if lower.ends_with(".csv") {
+        S3FormatResolved::Csv
+    } else if lower.ends_with(".json") || lower.ends_with(".ndjson") {
+        S3FormatResolved::Json
+    } else {
+        S3FormatResolved::Parquet
+    }
+}
+
 pub struct S3SchemaProvider {
     store: Arc<dyn ObjectStore>,
+    format: Option<S3Format>,
 }
 
 impl S3SchemaProvider {
@@ -22,67 +48,127 @@ impl S3SchemaProvider {
 
         Ok(Self {
             store: Arc::new(store),
+            format: None,
         })
+    }
+
+    pub fn with_format(mut self, format: Option<S3Format>) -> Self {
+        self.format = format;
+        self
     }
 
     #[cfg(test)]
     fn new_with_store(store: Arc<dyn ObjectStore>) -> Self {
-        Self { store }
+        Self {
+            store,
+            format: None,
+        }
+    }
+
+    async fn fetch_bytes(&self, identifier: &str) -> Result<Bytes> {
+        let path = Path::from(identifier);
+        let result = self
+            .store
+            .get(&path)
+            .await
+            .map_err(|e| SagoError::Io(std::io::Error::other(e)))?;
+        result
+            .bytes()
+            .await
+            .map_err(|e| SagoError::Io(std::io::Error::other(e)))
     }
 }
 
 #[async_trait]
 impl SchemaProvider for S3SchemaProvider {
     async fn get_schema(&self, identifier: &str) -> Result<Schema> {
-        let path = Path::from(identifier);
-
-        let result = self
-            .store
-            .get(&path)
-            .await
-            .map_err(|e| SagoError::Io(std::io::Error::other(e)))?;
-        let bytes: Bytes = result
-            .bytes()
-            .await
-            .map_err(|e| SagoError::Io(std::io::Error::other(e)))?;
-
-        let builder = ParquetRecordBatchReaderBuilder::try_new(bytes)
-            .map_err(|e| SagoError::Schema(format!("Failed to parse parquet schema: {}", e)))?;
-
-        Ok(builder.schema().as_ref().clone())
+        let bytes = self.fetch_bytes(identifier).await?;
+        match detect_format(self.format.as_ref(), identifier) {
+            S3FormatResolved::Parquet => schema_from_parquet(&bytes),
+            S3FormatResolved::Csv => schema_from_csv(&bytes),
+            S3FormatResolved::Json => schema_from_json(&bytes),
+        }
     }
 }
 
 #[async_trait]
 impl DataProvider for S3SchemaProvider {
     async fn get_data(&self, identifier: &str) -> Result<Vec<RecordBatch>> {
-        let path = Path::from(identifier);
-
-        let result = self
-            .store
-            .get(&path)
-            .await
-            .map_err(|e| SagoError::Io(std::io::Error::other(e)))?;
-        let bytes: Bytes = result
-            .bytes()
-            .await
-            .map_err(|e| SagoError::Io(std::io::Error::other(e)))?;
-
-        let builder = ParquetRecordBatchReaderBuilder::try_new(bytes)
-            .map_err(|e| SagoError::Schema(format!("Failed to parse parquet schema: {}", e)))?;
-
-        let reader = builder
-            .build()
-            .map_err(|e| SagoError::Schema(format!("Failed to build parquet reader: {}", e)))?;
-
-        let mut batches = Vec::new();
-        for batch_result in reader {
-            let batch = batch_result.map_err(SagoError::Arrow)?;
-            batches.push(batch);
+        let bytes = self.fetch_bytes(identifier).await?;
+        match detect_format(self.format.as_ref(), identifier) {
+            S3FormatResolved::Parquet => data_from_parquet(&bytes),
+            S3FormatResolved::Csv => data_from_csv(&bytes),
+            S3FormatResolved::Json => data_from_json(&bytes),
         }
-
-        Ok(batches)
     }
+}
+
+fn schema_from_parquet(bytes: &Bytes) -> Result<Schema> {
+    let builder = ParquetRecordBatchReaderBuilder::try_new(bytes.clone())
+        .map_err(|e| SagoError::Schema(format!("Failed to parse parquet schema: {}", e)))?;
+    Ok(builder.schema().as_ref().clone())
+}
+
+fn schema_from_csv(bytes: &Bytes) -> Result<Schema> {
+    use arrow::csv::reader::Format;
+    let format = Format::default().with_header(true);
+    let (schema, _) = format
+        .infer_schema(&mut std::io::Cursor::new(bytes.as_ref()), Some(100))
+        .map_err(|e| SagoError::Schema(format!("CSV schema inference failed: {e}")))?;
+    Ok(schema)
+}
+
+fn schema_from_json(bytes: &Bytes) -> Result<Schema> {
+    use arrow::json::reader::infer_json_schema;
+    let (schema, _) = infer_json_schema(std::io::Cursor::new(bytes.as_ref()), Some(100))
+        .map_err(|e| SagoError::Schema(format!("JSON schema inference failed: {e}")))?;
+    Ok(schema)
+}
+
+fn data_from_parquet(bytes: &Bytes) -> Result<Vec<RecordBatch>> {
+    let builder = ParquetRecordBatchReaderBuilder::try_new(bytes.clone())
+        .map_err(|e| SagoError::Schema(format!("Failed to parse parquet schema: {}", e)))?;
+    let reader = builder
+        .build()
+        .map_err(|e| SagoError::Schema(format!("Failed to build parquet reader: {}", e)))?;
+    let mut batches = Vec::new();
+    for batch_result in reader {
+        batches.push(batch_result.map_err(SagoError::Arrow)?);
+    }
+    Ok(batches)
+}
+
+fn data_from_csv(bytes: &Bytes) -> Result<Vec<RecordBatch>> {
+    use arrow::csv::ReaderBuilder;
+    use arrow::csv::reader::Format;
+    let format = Format::default().with_header(true);
+    let (schema, _) = format
+        .infer_schema(&mut std::io::Cursor::new(bytes.as_ref()), Some(100))
+        .map_err(|e| SagoError::Schema(format!("CSV schema inference failed: {e}")))?;
+    let reader = ReaderBuilder::new(Arc::new(schema))
+        .with_header(true)
+        .build(std::io::Cursor::new(bytes.as_ref()))
+        .map_err(|e| SagoError::Schema(format!("Failed to build CSV reader: {e}")))?;
+    let mut batches = Vec::new();
+    for batch_result in reader {
+        batches.push(batch_result.map_err(SagoError::Arrow)?);
+    }
+    Ok(batches)
+}
+
+fn data_from_json(bytes: &Bytes) -> Result<Vec<RecordBatch>> {
+    use arrow::json::ReaderBuilder;
+    use arrow::json::reader::infer_json_schema;
+    let (schema, _) = infer_json_schema(std::io::Cursor::new(bytes.as_ref()), Some(100))
+        .map_err(|e| SagoError::Schema(format!("JSON schema inference failed: {e}")))?;
+    let reader = ReaderBuilder::new(Arc::new(schema))
+        .build(std::io::Cursor::new(bytes.as_ref()))
+        .map_err(|e| SagoError::Schema(format!("Failed to build JSON reader: {e}")))?;
+    let mut batches = Vec::new();
+    for batch_result in reader {
+        batches.push(batch_result.map_err(SagoError::Arrow)?);
+    }
+    Ok(batches)
 }
 
 #[cfg(test)]
@@ -126,6 +212,99 @@ mod tests {
         let store = Arc::new(InMemory::new());
         store.put(&Path::from(path), bytes.into()).await.unwrap();
         store
+    }
+
+    // ── detect_format ────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_detect_format_parquet() {
+        assert!(matches!(
+            detect_format(None, "data/file.parquet"),
+            S3FormatResolved::Parquet
+        ));
+        assert!(matches!(
+            detect_format(None, "data/file.PARQUET"),
+            S3FormatResolved::Parquet
+        ));
+        assert!(matches!(
+            detect_format(None, "data/file.unknown"),
+            S3FormatResolved::Parquet
+        ));
+    }
+
+    #[test]
+    fn test_detect_format_csv() {
+        assert!(matches!(
+            detect_format(None, "data/file.csv"),
+            S3FormatResolved::Csv
+        ));
+        assert!(matches!(
+            detect_format(None, "data/file.CSV"),
+            S3FormatResolved::Csv
+        ));
+    }
+
+    #[test]
+    fn test_detect_format_json() {
+        assert!(matches!(
+            detect_format(None, "data/file.json"),
+            S3FormatResolved::Json
+        ));
+        assert!(matches!(
+            detect_format(None, "data/file.ndjson"),
+            S3FormatResolved::Json
+        ));
+    }
+
+    #[test]
+    fn test_detect_format_override() {
+        use crate::config::S3Format;
+        assert!(matches!(
+            detect_format(Some(&S3Format::Csv), "data/file.parquet"),
+            S3FormatResolved::Csv
+        ));
+        assert!(matches!(
+            detect_format(Some(&S3Format::Json), "data/file.csv"),
+            S3FormatResolved::Json
+        ));
+    }
+
+    // ── CSV helpers ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_schema_from_csv_basic() {
+        let csv_data = b"id,name,score\n1,alice,9.5\n2,bob,8.0\n";
+        let schema = schema_from_csv(&bytes::Bytes::from(csv_data.as_ref())).unwrap();
+        assert_eq!(schema.fields().len(), 3);
+        assert!(schema.field_with_name("id").is_ok());
+        assert!(schema.field_with_name("name").is_ok());
+        assert!(schema.field_with_name("score").is_ok());
+    }
+
+    #[test]
+    fn test_data_from_csv_basic() {
+        let csv_data = b"id,name\n1,alice\n2,bob\n3,carol\n";
+        let batches = data_from_csv(&bytes::Bytes::from(csv_data.as_ref())).unwrap();
+        let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total_rows, 3);
+    }
+
+    // ── JSON helpers ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_schema_from_json_basic() {
+        let json_data = b"{\"id\":1,\"name\":\"alice\"}\n{\"id\":2,\"name\":\"bob\"}\n";
+        let schema = schema_from_json(&bytes::Bytes::from(json_data.as_ref())).unwrap();
+        assert!(schema.field_with_name("id").is_ok());
+        assert!(schema.field_with_name("name").is_ok());
+    }
+
+    #[test]
+    fn test_data_from_json_basic() {
+        let json_data = b"{\"id\":1,\"val\":1.5}\n{\"id\":2,\"val\":2.5}\n";
+        let batches = data_from_json(&bytes::Bytes::from(json_data.as_ref())).unwrap();
+        let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total_rows, 2);
     }
 
     // ── get_schema ───────────────────────────────────────────────────────────
