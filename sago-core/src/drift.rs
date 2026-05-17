@@ -799,7 +799,10 @@ mod tests {
         let drift = detect_data_drift(&[b1], &[b2]);
         let col = drift.column_drifts.get("v").unwrap();
         let ks = col.ks_statistic.unwrap();
-        assert!(ks > 0.0 && ks < 1.0, "partial overlap ks={ks} should be in (0, 1)");
+        assert!(
+            ks > 0.0 && ks < 1.0,
+            "partial overlap ks={ks} should be in (0, 1)"
+        );
     }
 
     #[test]
@@ -823,7 +826,7 @@ mod tests {
         let non_empty = int32_batch("v", vec![Some(1), Some(2)]);
         let drift = detect_data_drift(&[empty], &[non_empty]);
         let col = drift.column_drifts.get("v").unwrap();
-        // All values are null/absent → ks undefined
+        // empty batch (0 rows) → ks undefined
         assert_eq!(col.ks_statistic, None);
         assert_eq!(col.ks_p_value, None);
     }

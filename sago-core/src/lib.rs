@@ -92,7 +92,7 @@ mod tests {
     fn test_error_io_display() {
         let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "file missing");
         let e = SagoError::Io(io_err);
-        assert!(e.to_string().contains("file missing") || e.to_string().contains("I/O"));
+        assert!(e.to_string().contains("file missing"));
     }
 
     #[test]
@@ -108,9 +108,7 @@ mod tests {
     #[async_trait]
     impl SchemaProvider for MockDataProvider {
         async fn get_schema(&self, _identifier: &str) -> Result<Schema> {
-            Ok(Schema::new(vec![
-                Field::new("id", DataType::Int32, false),
-            ]))
+            Ok(Schema::new(vec![Field::new("id", DataType::Int32, false)]))
         }
     }
 
@@ -120,11 +118,9 @@ mod tests {
             use arrow::array::Int32Array;
             use std::sync::Arc;
             let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
-            let batch = RecordBatch::try_new(
-                schema,
-                vec![Arc::new(Int32Array::from(vec![1, 2, 3]))],
-            )
-            .map_err(SagoError::Arrow)?;
+            let batch =
+                RecordBatch::try_new(schema, vec![Arc::new(Int32Array::from(vec![1, 2, 3]))])
+                    .map_err(SagoError::Arrow)?;
             Ok(vec![batch])
         }
     }

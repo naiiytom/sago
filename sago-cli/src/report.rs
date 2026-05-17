@@ -2,20 +2,26 @@ use anyhow::{Context, Result};
 use sago_core::diff::DiffReport;
 use std::path::Path;
 
-#[allow(dead_code)]
 pub fn print_terminal(reports: &[DiffReport]) {
-    print_terminal_to(reports, &mut std::io::stdout());
+    let _ = print_terminal_to(reports, &mut std::io::stdout());
 }
 
-pub fn print_terminal_to<W: std::io::Write>(reports: &[DiffReport], w: &mut W) {
+pub fn print_terminal_to<W: std::io::Write>(
+    reports: &[DiffReport],
+    w: &mut W,
+) -> std::io::Result<()> {
     for r in reports {
-        writeln!(w, "── {}  ↔  {} ──", r.source_identifier, r.target_identifier).ok();
+        writeln!(
+            w,
+            "── {}  ↔  {} ──",
+            r.source_identifier, r.target_identifier
+        )?;
         let s = &r.schema_drift;
         if !s.added_fields.is_empty() {
-            writeln!(w, "  added fields:   {}", s.added_fields.join(", ")).ok();
+            writeln!(w, "  added fields:   {}", s.added_fields.join(", "))?;
         }
         if !s.removed_fields.is_empty() {
-            writeln!(w, "  removed fields: {}", s.removed_fields.join(", ")).ok();
+            writeln!(w, "  removed fields: {}", s.removed_fields.join(", "))?;
         }
         if !s.changed_types.is_empty() {
             for c in &s.changed_types {
@@ -23,8 +29,7 @@ pub fn print_terminal_to<W: std::io::Write>(reports: &[DiffReport], w: &mut W) {
                     w,
                     "  type change:    {} ({} -> {})",
                     c.field_name, c.old_type, c.new_type
-                )
-                .ok();
+                )?;
             }
         }
         if !r.data_drift.column_drifts.is_empty() {
@@ -34,8 +39,7 @@ pub fn print_terminal_to<W: std::io::Write>(reports: &[DiffReport], w: &mut W) {
                         w,
                         "  data drift:     {} mean_drift={:?} null_count_drift={}",
                         col, d.mean_drift, d.null_count_drift,
-                    )
-                    .ok();
+                    )?;
                 }
             }
         }
@@ -45,11 +49,11 @@ pub fn print_terminal_to<W: std::io::Write>(reports: &[DiffReport], w: &mut W) {
                     w,
                     "  semantic drift: {} ({:?} -> {:?})",
                     sd.field_name, sd.source_type, sd.target_type,
-                )
-                .ok();
+                )?;
             }
         }
     }
+    Ok(())
 }
 
 #[allow(dead_code)]
@@ -74,9 +78,9 @@ pub fn default_artifact_path() -> std::path::PathBuf {
 mod tests {
     use super::*;
     use sago_core::diff::DiffReport;
+    use sago_core::drift::SemanticDrift;
     use sago_core::drift::{ColumnDrift, ColumnStats, DataDrift, SchemaDrift, TypeChange};
     use sago_core::semantic::SemanticType;
-    use sago_core::drift::SemanticDrift;
     use std::collections::HashMap;
 
     fn empty_report() -> DiffReport {
@@ -98,7 +102,7 @@ mod tests {
 
     fn capture(reports: &[DiffReport]) -> String {
         let mut buf = Vec::new();
-        print_terminal_to(reports, &mut buf);
+        print_terminal_to(reports, &mut buf).unwrap();
         String::from_utf8(buf).unwrap()
     }
 
@@ -151,17 +155,32 @@ mod tests {
     #[test]
     fn test_print_terminal_data_drift_shown_when_mean_drifts() {
         let mut drifts = HashMap::new();
-        let stats = ColumnStats { null_count: 0, row_count: 100, mean: Some(1.0), min: Some(0.0), max: Some(2.0) };
-        drifts.insert("score".into(), ColumnDrift {
-            source_stats: stats.clone(),
-            target_stats: ColumnStats { mean: Some(5.0), ..stats },
-            mean_drift: Some(4.0),
-            null_count_drift: 0,
-            ks_statistic: None,
-            ks_p_value: None,
-        });
+        let stats = ColumnStats {
+            null_count: 0,
+            row_count: 100,
+            mean: Some(1.0),
+            min: Some(0.0),
+            max: Some(2.0),
+        };
+        drifts.insert(
+            "score".into(),
+            ColumnDrift {
+                source_stats: stats.clone(),
+                target_stats: ColumnStats {
+                    mean: Some(5.0),
+                    ..stats
+                },
+                mean_drift: Some(4.0),
+                null_count_drift: 0,
+                ks_statistic: None,
+                ks_p_value: None,
+                psi_statistic: None,
+            },
+        );
         let mut r = empty_report();
-        r.data_drift = DataDrift { column_drifts: drifts };
+        r.data_drift = DataDrift {
+            column_drifts: drifts,
+        };
         let out = capture(&[r]);
         assert!(out.contains("data drift"));
         assert!(out.contains("score"));
@@ -170,17 +189,29 @@ mod tests {
     #[test]
     fn test_print_terminal_data_drift_hidden_when_no_drift() {
         let mut drifts = HashMap::new();
-        let stats = ColumnStats { null_count: 0, row_count: 10, mean: Some(1.0), min: Some(1.0), max: Some(1.0) };
-        drifts.insert("stable".into(), ColumnDrift {
-            source_stats: stats.clone(),
-            target_stats: stats,
-            mean_drift: Some(0.0),
-            null_count_drift: 0,
-            ks_statistic: None,
-            ks_p_value: None,
-        });
+        let stats = ColumnStats {
+            null_count: 0,
+            row_count: 10,
+            mean: Some(1.0),
+            min: Some(1.0),
+            max: Some(1.0),
+        };
+        drifts.insert(
+            "stable".into(),
+            ColumnDrift {
+                source_stats: stats.clone(),
+                target_stats: stats,
+                mean_drift: Some(0.0),
+                null_count_drift: 0,
+                ks_statistic: None,
+                ks_p_value: None,
+                psi_statistic: None,
+            },
+        );
         let mut r = empty_report();
-        r.data_drift = DataDrift { column_drifts: drifts };
+        r.data_drift = DataDrift {
+            column_drifts: drifts,
+        };
         let out = capture(&[r]);
         assert!(!out.contains("data drift"));
     }
@@ -211,7 +242,7 @@ mod tests {
         let out = capture(&[r1, r2]);
         assert!(out.contains("left"));
         assert!(out.contains("right"));
-        assert!(out.contains(" a ") || out.contains("── a"));
+        assert!(out.contains("── a"));
         assert!(out.contains("b"));
     }
 
