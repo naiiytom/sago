@@ -18,6 +18,15 @@ impl PostgresSchemaProvider {
         Self { pool }
     }
 
+    pub(crate) fn quote_identifier(identifier: &str) -> String {
+        identifier
+            .split('.')
+            .map(|part| part.replace('"', "\"\""))
+            .map(|part| format!("\"{}\"", part))
+            .collect::<Vec<_>>()
+            .join(".")
+    }
+
     pub(crate) fn map_postgres_type(data_type: &str) -> DataType {
         match data_type {
             "boolean" => DataType::Boolean,
@@ -95,13 +104,7 @@ impl DataProvider for PostgresSchemaProvider {
     async fn get_data(&self, identifier: &str) -> Result<Vec<RecordBatch>> {
         let schema = self.get_schema(identifier).await?;
 
-        // Securely quote identifiers to prevent SQL injection while supporting multi-part names
-        let quoted_identifier = identifier
-            .split('.')
-            .map(|part| part.replace('"', "\"\""))
-            .map(|part| format!("\"{}\"", part))
-            .collect::<Vec<_>>()
-            .join(".");
+        let quoted_identifier = Self::quote_identifier(identifier);
 
         let query = format!("SELECT * FROM {}", quoted_identifier);
 
@@ -336,6 +339,50 @@ mod tests {
             DataType::Timestamp(_, Some(_))
         ));
     }
+
+    // ── quote_identifier ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_quote_identifier_simple_name() {
+        assert_eq!(
+            PostgresSchemaProvider::quote_identifier("users"),
+            "\"users\""
+        );
+    }
+
+    #[test]
+    fn test_quote_identifier_schema_dot_table() {
+        assert_eq!(
+            PostgresSchemaProvider::quote_identifier("public.users"),
+            "\"public\".\"users\""
+        );
+    }
+
+    #[test]
+    fn test_quote_identifier_escapes_embedded_double_quote() {
+        assert_eq!(
+            PostgresSchemaProvider::quote_identifier("bad\"name"),
+            "\"bad\"\"name\""
+        );
+    }
+
+    #[test]
+    fn test_quote_identifier_prevents_injection() {
+        // A closing " would end a quoted identifier and allow SQL injection.
+        // The quoting must escape " to "" so the whole string remains a single token.
+        let malicious = "users\"; DROP TABLE users; --";
+        let quoted = PostgresSchemaProvider::quote_identifier(malicious);
+        // Wraps in outer quotes
+        assert!(quoted.starts_with('"'));
+        assert!(quoted.ends_with('"'));
+        // The embedded " is doubled so it cannot break out of the identifier
+        assert!(quoted.contains("\"\""));
+        // The result equals wrapping the content with all " escaped
+        let expected = format!("\"{}\"", malicious.replace('"', "\"\""));
+        assert_eq!(quoted, expected);
+    }
+
+    // ── map_postgres_type ────────────────────────────────────────────────────
 
     #[test]
     fn test_map_postgres_type_unknown_falls_back_to_utf8() {

@@ -73,4 +73,71 @@ mod tests {
         let schema = provider.get_schema("test_table").await.unwrap();
         assert_eq!(schema.fields().len(), 2);
     }
+
+    // ── SagoError display formatting ─────────────────────────────────────────
+
+    #[test]
+    fn test_error_config_display() {
+        let e = SagoError::Config("bad value".into());
+        assert!(e.to_string().contains("bad value"));
+    }
+
+    #[test]
+    fn test_error_schema_display() {
+        let e = SagoError::Schema("table not found".into());
+        assert!(e.to_string().contains("table not found"));
+    }
+
+    #[test]
+    fn test_error_io_display() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "file missing");
+        let e = SagoError::Io(io_err);
+        assert!(e.to_string().contains("file missing"));
+    }
+
+    #[test]
+    fn test_error_unknown_display() {
+        let e = SagoError::Unknown("something weird".into());
+        assert!(e.to_string().contains("something weird"));
+    }
+
+    // ── DataProvider trait with a mock ───────────────────────────────────────
+
+    struct MockDataProvider;
+
+    #[async_trait]
+    impl SchemaProvider for MockDataProvider {
+        async fn get_schema(&self, _identifier: &str) -> Result<Schema> {
+            Ok(Schema::new(vec![Field::new("id", DataType::Int32, false)]))
+        }
+    }
+
+    #[async_trait]
+    impl DataProvider for MockDataProvider {
+        async fn get_data(&self, _identifier: &str) -> Result<Vec<RecordBatch>> {
+            use arrow::array::Int32Array;
+            use std::sync::Arc;
+            let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
+            let batch =
+                RecordBatch::try_new(schema, vec![Arc::new(Int32Array::from(vec![1, 2, 3]))])
+                    .map_err(SagoError::Arrow)?;
+            Ok(vec![batch])
+        }
+    }
+
+    #[tokio::test]
+    async fn test_data_provider_get_data() {
+        let provider = MockDataProvider;
+        let batches = provider.get_data("tbl").await.unwrap();
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].num_rows(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_data_provider_schema_and_data_consistent() {
+        let provider = MockDataProvider;
+        let schema = provider.get_schema("tbl").await.unwrap();
+        let batches = provider.get_data("tbl").await.unwrap();
+        assert_eq!(schema.fields().len(), batches[0].schema().fields().len());
+    }
 }
