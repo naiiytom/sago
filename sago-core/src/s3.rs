@@ -96,8 +96,7 @@ mod tests {
 
     fn make_parquet_bytes(schema: Arc<Schema>, batches: &[RecordBatch]) -> Bytes {
         let mut buf = Vec::new();
-        let mut writer =
-            parquet::arrow::ArrowWriter::try_new(&mut buf, schema, None).unwrap();
+        let mut writer = parquet::arrow::ArrowWriter::try_new(&mut buf, schema, None).unwrap();
         for batch in batches {
             writer.write(batch).unwrap();
         }
@@ -125,10 +124,7 @@ mod tests {
 
     async fn store_with_parquet(path: &str, bytes: Bytes) -> Arc<InMemory> {
         let store = Arc::new(InMemory::new());
-        store
-            .put(&Path::from(path), bytes.into())
-            .await
-            .unwrap();
+        store.put(&Path::from(path), bytes.into()).await.unwrap();
         store
     }
 
@@ -243,6 +239,9 @@ mod tests {
         let batch_schema = batches[0].schema();
 
         assert_eq!(inferred_schema.fields().len(), batch_schema.fields().len());
-        assert_eq!(inferred_schema.field(0).name(), batch_schema.field(0).name());
+        assert_eq!(
+            inferred_schema.field(0).name(),
+            batch_schema.field(0).name()
+        );
     }
 }

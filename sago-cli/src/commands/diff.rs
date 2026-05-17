@@ -158,7 +158,12 @@ drift_threshold = 0.05
         let cfg = test_config();
         let result = resolve(&cfg, "unknown_conn:table");
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("unknown connection"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("unknown connection")
+        );
     }
 
     #[test]
@@ -166,6 +171,11 @@ drift_threshold = 0.05
         let cfg = test_config();
         let result = resolve(&cfg, "no_such_target");
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("not a target name"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("not a target name")
+        );
     }
 }
