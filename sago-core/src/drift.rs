@@ -49,6 +49,8 @@ pub struct ColumnDrift {
     pub null_count_drift: i64,
     pub ks_statistic: Option<f64>,
     pub ks_p_value: Option<f64>,
+    #[serde(default)]
+    pub psi_statistic: Option<f64>,
 }
 
 pub fn detect_schema_drift(source: &Schema, target: &Schema) -> SchemaDrift {
@@ -245,6 +247,7 @@ pub fn detect_data_drift_from_stats(
                 null_count_drift,
                 ks_statistic: None,
                 ks_p_value: None,
+                psi_statistic: None,
             },
         );
     }
@@ -297,6 +300,12 @@ pub fn detect_data_drift(
         let (ks_statistic, ks_p_value) =
             calculate_ks_test(source_batches, target_batches, field_name);
 
+        let psi_statistic = {
+            let src = extract_numeric_values(source_batches, field_name);
+            let tgt = extract_numeric_values(target_batches, field_name);
+            calculate_psi(&src, &tgt)
+        };
+
         column_drifts.insert(
             field_name.clone(),
             ColumnDrift {
@@ -306,6 +315,7 @@ pub fn detect_data_drift(
                 null_count_drift,
                 ks_statistic,
                 ks_p_value,
+                psi_statistic,
             },
         );
     }
@@ -425,6 +435,55 @@ fn calculate_ks_test(
     }
 
     (Some(max_dist), Some(p_value))
+}
+
+const PSI_NUM_BINS: usize = 10;
+const PSI_EPSILON: f64 = 0.0001;
+
+fn calculate_psi(source: &[f64], target: &[f64]) -> Option<f64> {
+    if source.is_empty() || target.is_empty() {
+        return None;
+    }
+
+    let min_val = source
+        .iter()
+        .chain(target.iter())
+        .copied()
+        .fold(f64::INFINITY, f64::min);
+    let max_val = source
+        .iter()
+        .chain(target.iter())
+        .copied()
+        .fold(f64::NEG_INFINITY, f64::max);
+
+    if (max_val - min_val).abs() < f64::EPSILON {
+        return Some(0.0);
+    }
+
+    let bin_width = (max_val - min_val) / PSI_NUM_BINS as f64;
+    let mut source_counts = [0usize; PSI_NUM_BINS];
+    let mut target_counts = [0usize; PSI_NUM_BINS];
+
+    for &v in source {
+        let idx = (((v - min_val) / bin_width) as usize).min(PSI_NUM_BINS - 1);
+        source_counts[idx] += 1;
+    }
+    for &v in target {
+        let idx = (((v - min_val) / bin_width) as usize).min(PSI_NUM_BINS - 1);
+        target_counts[idx] += 1;
+    }
+
+    let n_src = source.len() as f64;
+    let n_tgt = target.len() as f64;
+    let mut psi = 0.0;
+
+    for i in 0..PSI_NUM_BINS {
+        let e = (source_counts[i] as f64 / n_src).max(PSI_EPSILON);
+        let a = (target_counts[i] as f64 / n_tgt).max(PSI_EPSILON);
+        psi += (a - e) * (a / e).ln();
+    }
+
+    Some(psi)
 }
 
 #[cfg(test)]
@@ -746,5 +805,67 @@ mod tests {
         assert_eq!(score.null_count_drift, 5);
         assert_eq!(score.ks_statistic, None);
         assert_eq!(score.ks_p_value, None);
+    }
+
+    // ── PSI metric ───────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_psi_none_for_non_numeric() {
+        let b1 = str_batch("name", vec![Some("a"), Some("b"), Some("c")]);
+        let b2 = str_batch("name", vec![Some("d"), Some("e"), Some("f")]);
+        let drift = detect_data_drift(&[b1], &[b2]);
+        let col = drift.column_drifts.get("name").unwrap();
+        assert_eq!(col.psi_statistic, None);
+    }
+
+    #[test]
+    fn test_psi_none_in_stats_based_drift() {
+        use std::collections::HashMap;
+
+        let mut source = HashMap::new();
+        source.insert(
+            "x".to_string(),
+            ColumnStats {
+                null_count: 0,
+                row_count: 5,
+                mean: Some(2.0),
+                min: Some(1.0),
+                max: Some(3.0),
+            },
+        );
+        let mut target = HashMap::new();
+        target.insert(
+            "x".to_string(),
+            ColumnStats {
+                null_count: 0,
+                row_count: 5,
+                mean: Some(5.0),
+                min: Some(4.0),
+                max: Some(6.0),
+            },
+        );
+        let drift = detect_data_drift_from_stats(&source, &target);
+        let col = drift.column_drifts.get("x").unwrap();
+        assert_eq!(col.psi_statistic, None);
+    }
+
+    #[test]
+    fn test_psi_zero_for_identical_distributions() {
+        let b1 = int32_batch("val", vec![Some(1), Some(2), Some(3), Some(4), Some(5)]);
+        let b2 = int32_batch("val", vec![Some(1), Some(2), Some(3), Some(4), Some(5)]);
+        let drift = detect_data_drift(&[b1], &[b2]);
+        let col = drift.column_drifts.get("val").unwrap();
+        assert!(col.psi_statistic.is_some());
+        assert!((col.psi_statistic.unwrap() - 0.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_psi_positive_for_shifted_distributions() {
+        let b1 = int32_batch("val", vec![Some(1), Some(2), Some(3), Some(4), Some(5)]);
+        let b2 = int32_batch("val", vec![Some(6), Some(7), Some(8), Some(9), Some(10)]);
+        let drift = detect_data_drift(&[b1], &[b2]);
+        let col = drift.column_drifts.get("val").unwrap();
+        assert!(col.psi_statistic.is_some());
+        assert!(col.psi_statistic.unwrap() > 0.1);
     }
 }
