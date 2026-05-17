@@ -170,3 +170,34 @@ fn test_full_init_then_help_subcommands() {
         .assert()
         .failure();
 }
+
+#[test]
+fn test_explore_appears_in_help() {
+    Command::cargo_bin("sago")
+        .unwrap()
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("explore"));
+}
+
+#[test]
+fn test_explore_help() {
+    Command::cargo_bin("sago")
+        .unwrap()
+        .args(["explore", "--help"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn test_explore_fails_without_sago_toml() {
+    let dir = tempfile::tempdir().unwrap();
+    Command::cargo_bin("sago")
+        .unwrap()
+        .arg("explore")
+        .current_dir(dir.path())
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("Sago.toml"));
+}
