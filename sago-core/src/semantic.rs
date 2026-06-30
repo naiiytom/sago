@@ -2,6 +2,7 @@ use arrow::array::{Array, StringArray};
 use arrow::datatypes::DataType;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use std::sync::LazyLock;
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
 pub enum SemanticType {
@@ -14,14 +15,24 @@ pub enum SemanticType {
     Unknown,
 }
 
-lazy_static::lazy_static! {
-    static ref EMAIL_REGEX: Regex = Regex::new(r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$").unwrap();
-    static ref CREDIT_CARD_REGEX: Regex = Regex::new(r"^(?:4[0-9]{12}(?:[0-9]{3})?|5[1-5][0-9]{14}|3[47][0-9]{13}|3(?:0[0-5]|[68][0-9])[0-9]{11}|6(?:011|5[0-9]{2})[0-9]{12}|(?:2131|1800|35\d{3})\d{11})$").unwrap();
-    static ref PHONE_NUMBER_REGEX: Regex = Regex::new(r"^\+?[1-9]\d{1,14}$").unwrap();
-    static ref UUID_REGEX: Regex = Regex::new(r"^[0-9a-fA-F]{8}\b-[0-9a-fA-F]{4}\b-[0-9a-fA-F]{4}\b-[0-9a-fA-F]{4}\b-[0-9a-fA-F]{12}$").unwrap();
-    static ref IP_ADDRESS_REGEX: Regex = Regex::new(r"^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$").unwrap();
-    static ref URL_REGEX: Regex = Regex::new(r"^https?://[^\s/$.?#].[^\s]*$").unwrap();
-}
+static EMAIL_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$").unwrap());
+static CREDIT_CARD_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^(?:4[0-9]{12}(?:[0-9]{3})?|5[1-5][0-9]{14}|3[47][0-9]{13}|3(?:0[0-5]|[68][0-9])[0-9]{11}|6(?:011|5[0-9]{2})[0-9]{12}|(?:2131|1800|35\d{3})\d{11})$").unwrap()
+});
+static PHONE_NUMBER_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^\+?[1-9]\d{1,14}$").unwrap());
+static UUID_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"^[0-9a-fA-F]{8}\b-[0-9a-fA-F]{4}\b-[0-9a-fA-F]{4}\b-[0-9a-fA-F]{4}\b-[0-9a-fA-F]{12}$",
+    )
+    .unwrap()
+});
+static IP_ADDRESS_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$").unwrap()
+});
+static URL_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^https?://[^\s/$.?#].[^\s]*$").unwrap());
 
 pub fn infer_semantic_type(column_name: &str, array: &dyn Array) -> SemanticType {
     let lower_name = column_name.to_lowercase();

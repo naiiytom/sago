@@ -20,23 +20,35 @@ Sago is a high-performance, declarative data reliability framework written in Ru
     ```
 
 2.  **Initialize a Project**:
+    `init` scaffolds `Sago.toml` and a `.sago/` state directory in the current
+    directory, so create and enter a folder first:
     ```bash
+    mkdir my-data-project && cd my-data-project
     sago init my-data-project
-    cd my-data-project
     ```
 
 3.  **Configure Connections**:
-    Edit `Sago.toml` to define your data sources.
+    Edit `Sago.toml` to define your data sources and the datasets to track.
     ```toml
-    [connections.postgres]
+    [connections.warehouse]
     type = "postgres"
-    url = "postgres://user:pass@localhost/db"
+    url  = "postgres://user:pass@localhost/db"
+
+    [targets.users]
+    connection = "warehouse"
+    identifier = "public.users"
     ```
 
-4.  **Run Checks**:
+4.  **Capture a baseline, then check for drift**:
     ```bash
-    sago plan
-    sago apply
+    sago apply          # snapshot live data into the baseline
+    sago plan           # report drift since the last apply
+    sago explore        # browse snapshots in an interactive TUI
+    ```
+
+    You can also compare two sources directly without a baseline:
+    ```bash
+    sago diff warehouse:public.users archive:users.parquet
     ```
 
 ## Architecture

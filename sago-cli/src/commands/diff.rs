@@ -9,9 +9,9 @@ use crate::report::{default_artifact_path, print_terminal, write_artifact};
 
 #[derive(Args, Debug)]
 pub struct DiffArgs {
-    /// Left source: <connection>:<identifier> or <target_name>
+    /// Left source: `<connection>:<identifier>` or `<target_name>`
     pub left: String,
-    /// Right source: <connection>:<identifier> or <target_name>
+    /// Right source: `<connection>:<identifier>` or `<target_name>`
     pub right: String,
     /// Where to write the JSON artifact
     #[arg(long)]
