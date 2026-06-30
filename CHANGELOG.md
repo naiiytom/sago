@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Three-way schema merge** (`sago-core::merge`): `three_way_merge(base, ours,
+  theirs)` reconciles two independently evolved schemas against their common
+  ancestor. Non-conflicting changes (one-sided edits, identical edits, shared
+  removals) auto-resolve into a best-effort merged `Schema`; genuine
+  disagreements are reported as `MergeConflict`s classified `AddAdd`,
+  `ModifyModify`, or `RemoveModify`. Re-exported from `sago-sdk`.
+- **Merkle tree commitments** (`sago-core::merkle`): `MerkleTree` builds a
+  SHA-256 binary Merkle tree with domain-separated leaf/node hashing (second-
+  preimage resistant), exposes the `root`/`root_hex` commitment, and produces
+  `InclusionProof`s verifiable with `verify_proof` — the primitive for
+  verifiable data synchronization. Adds a direct `sha2` dependency. Re-exported
+  from `sago-sdk`.
 - **Semantic smart renaming** (`sago-core::rename`): removed/added column pairs
   are recognised as renames rather than a drop + add by comparing data type
   (a hard gate), inferred semantic type, distribution statistics, and name

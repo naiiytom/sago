@@ -28,6 +28,8 @@ pub mod config;
 pub mod connection;
 pub mod diff;
 pub mod drift;
+pub mod merge;
+pub mod merkle;
 pub mod postgres;
 pub mod rename;
 pub mod s3;

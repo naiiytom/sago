@@ -4,6 +4,8 @@ pub mod client;
 pub use sago_core::config::ConnectionConfig;
 pub use sago_core::diff::DiffReport;
 pub use sago_core::drift::{ColumnDrift, ColumnStats, DataDrift, SchemaDrift, SemanticDrift};
+pub use sago_core::merge::{ConflictKind, MergeConflict, MergeResult, three_way_merge};
+pub use sago_core::merkle::{InclusionProof, MerkleTree, ProofStep, verify_proof};
 pub use sago_core::rename::{ColumnProfile, FieldRename, RenameOptions, RenameSignals};
 pub use sago_core::semantic::SemanticType;
 pub use sago_core::state::TargetSnapshot;

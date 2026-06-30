@@ -28,7 +28,7 @@
 
 ## Phase 5: Future Directions
 - [x] **Semantic Smart Renaming**: Removed/added column pairs are recognised as renames using data type, inferred semantic type, distribution statistics, and name similarity, then folded into `SchemaDrift::renamed_fields` (wired into both `diff` and `plan`).
-- [ ] **3-Way Merge**: Handle conflicting schema changes gracefully.
-- [ ] **Merkle Trees**: Verifiable data synchronization using Merkle tree commitments (PSI is tracked under Phase 4).
+- [x] **3-Way Merge**: `sago-core::merge::three_way_merge` reconciles two divergent schema edits against a common ancestor, auto-resolving non-conflicting changes and reporting add/add, modify/modify, and remove/modify conflicts.
+- [x] **Merkle Trees**: `sago-core::merkle::MerkleTree` provides SHA-256 commitments with domain-separated leaf/node hashing, a root digest, and inclusion proofs (`proof`/`verify_proof`) for verifiable data synchronization.
 - [ ] **WASM Integration**: Compile core logic to WebAssembly for browser-based tools or edge execution.
 - [ ] **Decentralized Data Architectures**: Support for distributed data mesh concepts.
