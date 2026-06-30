@@ -12,22 +12,38 @@ keywords.workspace = true
 categories.workspace = true
 description = "Core engine for Sago: cross-modal diffing, semantic schema analysis, and statistical drift detection."
 
+[features]
+# `io` pulls in the data-source providers (PostgreSQL, S3/object-store, Parquet)
+# and the async runtime + filesystem state persistence. It is enabled by default
+# so native builds are unchanged. Disabling it (`default-features = false`)
+# leaves only the pure-analysis modules — semantic, drift, rename, merge,
+# merkle — which compile to wasm32-unknown-unknown.
+default = ["io"]
+io = [
+    "dep:parquet",
+    "dep:object_store",
+    "dep:bytes",
+    "dep:tokio",
+    "dep:sqlx",
+]
+
 [dependencies]
 arrow.workspace = true
-parquet.workspace = true
-object_store.workspace = true
-bytes.workspace = true
 async-trait.workspace = true
 thiserror.workspace = true
-anyhow.workspace = true
-tracing.workspace = true
 serde.workspace = true
 toml.workspace = true
-tokio.workspace = true
-sqlx.workspace = true
 regex = "1.12"
 serde_json.workspace = true
 chrono.workspace = true
+sha2.workspace = true
+
+# IO-only dependencies, gated behind the `io` feature.
+parquet = { workspace = true, optional = true }
+object_store = { workspace = true, optional = true }
+bytes = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+sqlx = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile.workspace = true

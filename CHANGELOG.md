@@ -9,6 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Data-mesh target metadata**: `TargetConfig` gained optional `domain` and
+  `owner` fields, the first concrete step toward decentralized / federated data
+  architectures. Existing configs are unaffected (both default to `None`). The
+  target architecture and follow-ups are documented in `docs/DECENTRALIZED.md`.
+- **WebAssembly support**: `sago-core` now has an `io` feature (enabled by
+  default) gating the PostgreSQL/S3 providers, the async runtime, and
+  filesystem state. With `default-features = false` the pure-analysis modules
+  (`semantic`, `drift`, `rename`, `merge`, `merkle`) compile to
+  `wasm32-unknown-unknown`. New `sago-wasm` crate exposes `infer_semantic`,
+  `merge_schemas`, and `merkle_root` to JavaScript via `wasm-bindgen` for
+  browser / edge execution.
+- **sago-proto gRPC interface**: `.proto` definitions for the `sago.v1` package
+  (schema, drift, semantic types, `DiffReport`, and a `SagoService` with
+  `GetSchema`/`Diff` RPCs). Compiled at build time with the **pure-Rust
+  `protox`** compiler driving `tonic-prost-build`, so the crate builds with no
+  system `protoc` toolchain — unblocking the item previously deferred for that
+  reason. Generates both client and server stubs.
+- **Three-way schema merge** (`sago-core::merge`): `three_way_merge(base, ours,
+  theirs)` reconciles two independently evolved schemas against their common
+  ancestor. Non-conflicting changes (one-sided edits, identical edits, shared
+  removals) auto-resolve into a best-effort merged `Schema`; genuine
+  disagreements are reported as `MergeConflict`s classified `AddAdd`,
+  `ModifyModify`, or `RemoveModify`. Re-exported from `sago-sdk`.
+- **Merkle tree commitments** (`sago-core::merkle`): `MerkleTree` builds a
+  SHA-256 binary Merkle tree with domain-separated leaf/node hashing (second-
+  preimage resistant), exposes the `root`/`root_hex` commitment, and produces
+  `InclusionProof`s verifiable with `verify_proof` — the primitive for
+  verifiable data synchronization. Adds a direct `sha2` dependency. Re-exported
+  from `sago-sdk`.
 - **Semantic smart renaming** (`sago-core::rename`): removed/added column pairs
   are recognised as renames rather than a drop + add by comparing data type
   (a hard gate), inferred semantic type, distribution statistics, and name

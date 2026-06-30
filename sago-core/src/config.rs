@@ -44,6 +44,15 @@ pub struct TargetConfig {
     pub identifier: String,
     #[serde(default)]
     pub sample: Option<SampleConfig>,
+    /// Data-mesh domain this target belongs to (e.g. "marketing", "finance").
+    /// Optional; lets a single Sago project federate targets owned by different
+    /// teams. See the "Decentralized Data Architectures" note in the roadmap.
+    #[serde(default)]
+    pub domain: Option<String>,
+    /// Owning team / contact for this target, for governance in a federated
+    /// (data-mesh) setup. Optional and free-form.
+    #[serde(default)]
+    pub owner: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -123,6 +132,42 @@ drift_threshold = 0.05
         let sample = events.sample.as_ref().unwrap();
         assert!(sample.enabled);
         assert_eq!(sample.n, 500);
+    }
+
+    #[test]
+    fn test_target_domain_and_owner_default_none() {
+        // Targets without explicit data-mesh metadata deserialize with None.
+        let cfg = Config::from_toml(VALID_TOML).unwrap();
+        let users = cfg.targets.get("users").unwrap();
+        assert!(users.domain.is_none());
+        assert!(users.owner.is_none());
+    }
+
+    #[test]
+    fn test_target_domain_and_owner_parsed() {
+        let toml = r#"
+[project]
+name = "mesh"
+version = "1"
+
+[connections.c]
+type = "s3"
+bucket = "b"
+region = "r"
+
+[targets.orders]
+connection = "c"
+identifier = "orders.parquet"
+domain = "sales"
+owner = "sales-data-team"
+
+[checks]
+drift_threshold = 0.05
+"#;
+        let cfg = Config::from_toml(toml).unwrap();
+        let orders = cfg.targets.get("orders").unwrap();
+        assert_eq!(orders.domain.as_deref(), Some("sales"));
+        assert_eq!(orders.owner.as_deref(), Some("sales-data-team"));
     }
 
     #[test]

@@ -8,6 +8,7 @@ pub enum SagoError {
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 
+    #[cfg(feature = "io")]
     #[error("Database error: {0}")]
     Database(#[from] sqlx::Error),
 
@@ -25,13 +26,22 @@ pub enum SagoError {
 }
 
 pub mod config;
-pub mod connection;
 pub mod diff;
 pub mod drift;
-pub mod postgres;
+pub mod merge;
+pub mod merkle;
 pub mod rename;
-pub mod s3;
 pub mod semantic;
+
+// Data-source providers and filesystem state persistence require the async
+// runtime / IO crates and are only available with the `io` feature.
+#[cfg(feature = "io")]
+pub mod connection;
+#[cfg(feature = "io")]
+pub mod postgres;
+#[cfg(feature = "io")]
+pub mod s3;
+#[cfg(feature = "io")]
 pub mod state;
 
 pub type Result<T> = std::result::Result<T, SagoError>;
