@@ -55,10 +55,11 @@ Sago is a high-performance, declarative data reliability framework written in Ru
 
 Sago is composed of the following components:
 
--   **sago-core**: The core engine containing the logic for diffing, schema analysis, and drift detection.
+-   **sago-core**: The core engine containing the logic for diffing, schema analysis, drift detection, semantic smart renaming, three-way schema merge, and Merkle commitments. The `io` feature (default-on) can be disabled to build the pure-analysis modules for WebAssembly.
 -   **sago-cli**: The command-line interface for interacting with Sago.
 -   **sago-sdk**: Rust SDK for building custom integrations and extensions.
--   **sago-proto**: Protocol Buffer definitions for internal communication and plugin interfaces.
+-   **sago-proto**: Protocol Buffer / gRPC definitions for plugin and microservice interfaces (compiled with the pure-Rust `protox` toolchain — no system `protoc` required).
+-   **sago-wasm**: WebAssembly bindings exposing semantic inference, schema merge, and Merkle commitments to JavaScript for browser / edge use.
 
 ## Roadmap
 

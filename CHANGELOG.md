@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Data-mesh target metadata**: `TargetConfig` gained optional `domain` and
+  `owner` fields, the first concrete step toward decentralized / federated data
+  architectures. Existing configs are unaffected (both default to `None`). The
+  target architecture and follow-ups are documented in `docs/DECENTRALIZED.md`.
 - **WebAssembly support**: `sago-core` now has an `io` feature (enabled by
   default) gating the PostgreSQL/S3 providers, the async runtime, and
   filesystem state. With `default-features = false` the pure-analysis modules
