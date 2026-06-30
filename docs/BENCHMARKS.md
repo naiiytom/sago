@@ -30,6 +30,6 @@ This document lists external benchmarks and research papers that inform the drif
 
 ## Benchmarking Strategy for Sago Phase 4
 
-1. **PSI & Merkle Efficiency:** Measure the overhead of Merkle Tree generation and path verification across different dataset sizes (N=10^3 to 10^6).
-2. **Distribution Drift:** ~~**Kolmogorov-Smirnov (KS) test**~~ ✅ Implemented in `sago-core/src/drift.rs`. **Population Stability Index (PSI)** — not yet implemented, planned for Phase 4.
+1. **Distribution Drift:** **Kolmogorov–Smirnov (KS) test** ✅ and **Population Stability Index (PSI)** ✅ — both implemented in `sago-core/src/drift.rs` and computed per numeric column in `detect_data_drift`.
+2. **Merkle Efficiency:** Measure the overhead of Merkle Tree generation and path verification across different dataset sizes (N=10^3 to 10^6) — planned for Phase 5.
 3. **Cross-Modal Validation:** Compare synchronization performance between PostgreSQL and S3 Parquet using the "Security-by-Design" framework principles.

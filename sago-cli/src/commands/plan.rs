@@ -4,6 +4,7 @@ use sago_core::config::Config;
 use sago_core::connection::build_provider;
 use sago_core::diff::DiffReport;
 use sago_core::drift::{SemanticDrift, detect_data_drift_from_stats, detect_schema_drift};
+use sago_core::rename::{RenameOptions, profile_columns, refine_renames};
 use sago_core::semantic::SemanticType;
 use sago_core::state::{ProjectState, capture_snapshot};
 use std::collections::HashMap;
@@ -61,7 +62,22 @@ pub async fn run(args: &PlanArgs) -> Result<()> {
 
         let baseline_schema = snap.schema.to_arrow_schema()?;
         let live_schema = live_snap.schema.to_arrow_schema()?;
-        let schema_drift = detect_schema_drift(&baseline_schema, &live_schema);
+        let mut schema_drift = detect_schema_drift(&baseline_schema, &live_schema);
+
+        // Recognise renames using the persisted baseline signals vs. the live ones.
+        let baseline_profiles =
+            profile_columns(&baseline_schema, &snap.semantic_types, &snap.column_stats);
+        let live_profiles = profile_columns(
+            &live_schema,
+            &live_snap.semantic_types,
+            &live_snap.column_stats,
+        );
+        refine_renames(
+            &mut schema_drift,
+            &baseline_profiles,
+            &live_profiles,
+            &RenameOptions::default(),
+        );
 
         let data_drift = detect_data_drift_from_stats(&snap.column_stats, &live_snap.column_stats);
 

@@ -93,7 +93,10 @@ fn run_tui(targets: Vec<String>) -> Result<()> {
 fn run_app<B: ratatui::backend::Backend>(
     terminal: &mut ratatui::Terminal<B>,
     app: &mut App,
-) -> Result<()> {
+) -> Result<()>
+where
+    <B as ratatui::backend::Backend>::Error: std::error::Error + Send + Sync + 'static,
+{
     loop {
         terminal.draw(|f| render(f, app))?;
         if let Event::Key(key) = event::read()?

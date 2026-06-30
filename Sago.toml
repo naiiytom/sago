@@ -2,18 +2,32 @@
 name = "sago-project"
 version = "0.1.0"
 
-[connections.postgres]
+# Named connections to your data sources.
+[connections.warehouse]
 type = "postgres"
 url = "postgres://user:password@localhost/db"
 
-[connections.s3]
+[connections.archive]
 type = "s3"
 bucket = "my-data-bucket"
 region = "us-east-1"
+# Optional: override format detection (parquet | csv | json).
+# format = "parquet"
 
-[schema]
-provider = "postgres"
-tables = ["users", "orders"]
+# Datasets to track. Each target references a connection and an identifier
+# (a "schema.table" for postgres, an object key for s3).
+[targets.users]
+connection = "warehouse"
+identifier = "public.users"
+
+[targets.events_2024]
+connection = "archive"
+identifier = "events/2024.parquet"
+
+# Optional per-target sample persistence for distribution drift metrics.
+[targets.events_2024.sample]
+enabled = true
+n = 1000
 
 [checks]
 drift_threshold = 0.05

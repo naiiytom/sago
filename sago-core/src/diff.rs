@@ -2,6 +2,7 @@ use crate::drift::{
     DataDrift, SchemaDrift, SemanticDrift, detect_data_drift, detect_schema_drift,
     detect_semantic_drift,
 };
+use crate::rename::{RenameOptions, profile_columns_from_batches, refine_renames};
 use crate::{DataProvider, Result};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -24,10 +25,20 @@ pub async fn diff_datasets(
     let source_schema = source_provider.get_schema(source_identifier).await?;
     let target_schema = target_provider.get_schema(target_identifier).await?;
 
-    let schema_drift = detect_schema_drift(&source_schema, &target_schema);
+    let mut schema_drift = detect_schema_drift(&source_schema, &target_schema);
 
     let source_data = source_provider.get_data(source_identifier).await?;
     let target_data = target_provider.get_data(target_identifier).await?;
+
+    // Fold removed/added pairs that are actually renames into `renamed_fields`.
+    let source_profiles = profile_columns_from_batches(&source_data);
+    let target_profiles = profile_columns_from_batches(&target_data);
+    refine_renames(
+        &mut schema_drift,
+        &source_profiles,
+        &target_profiles,
+        &RenameOptions::default(),
+    );
 
     let semantic_drifts = detect_semantic_drift(&source_data, &target_data);
     let data_drift = detect_data_drift(&source_data, &target_data);
@@ -216,6 +227,87 @@ mod tests {
         let report = diff_datasets(source, "s", target, "t").await.unwrap();
         assert!(!report.semantic_drifts.is_empty());
         assert_eq!(report.semantic_drifts[0].field_name, "contact");
+    }
+
+    #[tokio::test]
+    async fn test_diff_detects_rename() {
+        // Source has `email` (email data); target renames it to `email_address`
+        // with the same data. It should surface as a rename, not add+remove.
+        let source_schema = Schema::new(vec![Field::new("email", DataType::Utf8, true)]);
+        let target_schema = Schema::new(vec![Field::new("email_address", DataType::Utf8, true)]);
+
+        let emails = vec![
+            Some("a@x.com"),
+            Some("b@x.com"),
+            Some("c@x.com"),
+            Some("d@x.com"),
+            Some("e@x.com"),
+        ];
+        let source_batch = RecordBatch::try_new(
+            Arc::new(source_schema.clone()),
+            vec![Arc::new(StringArray::from(emails.clone())) as Arc<dyn Array>],
+        )
+        .unwrap();
+        let target_batch = RecordBatch::try_new(
+            Arc::new(target_schema.clone()),
+            vec![Arc::new(StringArray::from(emails)) as Arc<dyn Array>],
+        )
+        .unwrap();
+
+        let source = MockDataProvider::new(source_schema, vec![source_batch]);
+        let target = MockDataProvider::new(target_schema, vec![target_batch]);
+
+        let report = diff_datasets(source, "s", target, "t").await.unwrap();
+
+        assert!(
+            report.schema_drift.added_fields.is_empty(),
+            "added_fields should be emptied by rename folding"
+        );
+        assert!(
+            report.schema_drift.removed_fields.is_empty(),
+            "removed_fields should be emptied by rename folding"
+        );
+        assert_eq!(report.schema_drift.renamed_fields.len(), 1);
+        assert_eq!(report.schema_drift.renamed_fields[0].from, "email");
+        assert_eq!(report.schema_drift.renamed_fields[0].to, "email_address");
+    }
+
+    #[tokio::test]
+    async fn test_diff_unrelated_columns_not_renamed() {
+        // A dropped numeric column and an added string column with an unrelated
+        // name must NOT be treated as a rename.
+        let source_schema = Schema::new(vec![Field::new("price", DataType::Int32, true)]);
+        let target_schema = Schema::new(vec![Field::new("country", DataType::Utf8, true)]);
+
+        let source_batch = RecordBatch::try_new(
+            Arc::new(source_schema.clone()),
+            vec![Arc::new(Int32Array::from(vec![1, 2, 3])) as Arc<dyn Array>],
+        )
+        .unwrap();
+        let target_batch = RecordBatch::try_new(
+            Arc::new(target_schema.clone()),
+            vec![Arc::new(StringArray::from(vec!["US", "GB", "AU"])) as Arc<dyn Array>],
+        )
+        .unwrap();
+
+        let source = MockDataProvider::new(source_schema, vec![source_batch]);
+        let target = MockDataProvider::new(target_schema, vec![target_batch]);
+
+        let report = diff_datasets(source, "s", target, "t").await.unwrap();
+
+        assert!(report.schema_drift.renamed_fields.is_empty());
+        assert!(
+            report
+                .schema_drift
+                .removed_fields
+                .contains(&"price".to_string())
+        );
+        assert!(
+            report
+                .schema_drift
+                .added_fields
+                .contains(&"country".to_string())
+        );
     }
 
     #[tokio::test]

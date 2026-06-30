@@ -9,7 +9,7 @@ use commands::{apply::ApplyArgs, diff::DiffArgs, init::InitArgs, plan::PlanArgs}
 
 #[derive(Parser)]
 #[command(name = "sago")]
-#[command(about = "Terraform for DataOps", long_about = None)]
+#[command(version, about = "Terraform for DataOps", long_about = None)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,

@@ -23,6 +23,17 @@ pub fn print_terminal_to<W: std::io::Write>(
         if !s.removed_fields.is_empty() {
             writeln!(w, "  removed fields: {}", s.removed_fields.join(", "))?;
         }
+        if !s.renamed_fields.is_empty() {
+            for rn in &s.renamed_fields {
+                writeln!(
+                    w,
+                    "  renamed field:  {} -> {} (confidence {:.0}%)",
+                    rn.from,
+                    rn.to,
+                    rn.confidence * 100.0,
+                )?;
+            }
+        }
         if !s.changed_types.is_empty() {
             for c in &s.changed_types {
                 writeln!(
@@ -92,6 +103,7 @@ mod tests {
                 removed_fields: vec![],
                 changed_types: vec![],
                 semantic_drifts: vec![],
+                renamed_fields: vec![],
             },
             data_drift: DataDrift {
                 column_drifts: HashMap::new(),
@@ -214,6 +226,27 @@ mod tests {
         };
         let out = capture(&[r]);
         assert!(!out.contains("data drift"));
+    }
+
+    #[test]
+    fn test_print_terminal_renamed_field() {
+        use sago_core::rename::{FieldRename, RenameSignals};
+        let mut r = empty_report();
+        r.schema_drift.renamed_fields = vec![FieldRename {
+            from: "email".into(),
+            to: "email_address".into(),
+            confidence: 0.92,
+            signals: RenameSignals {
+                type_match: true,
+                semantic_match: true,
+                name_similarity: 0.6,
+                stats_similarity: None,
+            },
+        }];
+        let out = capture(&[r]);
+        assert!(out.contains("renamed field"));
+        assert!(out.contains("email -> email_address"));
+        assert!(out.contains("92%"));
     }
 
     #[test]

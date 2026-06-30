@@ -1,14 +1,23 @@
 [package]
 name = "sago-cli"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Sago command-line interface: init, apply, plan, diff, and an interactive TUI explorer."
 
 [[bin]]
 name = "sago"
 path = "src/main.rs"
 
 [dependencies]
-sago-core = { path = "../sago-core" }
+sago-core = { path = "../sago-core", version = "0.1.0" }
 clap.workspace = true
 tokio.workspace = true
 anyhow.workspace = true
@@ -17,7 +26,6 @@ tracing-subscriber.workspace = true
 serde_json.workspace = true
 chrono.workspace = true
 serde = { workspace = true }
-colored = "2.1"
 ratatui.workspace = true
 
 [dev-dependencies]

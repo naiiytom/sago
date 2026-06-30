@@ -1,12 +1,17 @@
 [package]
 name = "sago-proto"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Placeholder for Sago's gRPC/Protobuf plugin interface definitions (not yet implemented)."
+publish = false
 
+# NOTE: This crate is an intentional placeholder. The gRPC/Protobuf service
+# definitions are tracked under Phase 4 of docs/ROADMAP.md and are blocked on a
+# `protoc` toolchain. When implemented, re-add `prost`, `tonic`, and a
+# `tonic-build` build-dependency wired to a `build.rs`.
 [dependencies]
-prost.workspace = true
-tonic.workspace = true
-serde.workspace = true
-
-[build-dependencies]
-tonic-build.workspace = true

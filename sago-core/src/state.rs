@@ -257,7 +257,7 @@ mod tests {
         assert_eq!(restored.field(0).name(), "id");
         assert_eq!(restored.field(0).data_type(), &DataType::Int64);
         assert_eq!(restored.field(1).data_type(), &DataType::Utf8);
-        assert_eq!(restored.field(2).is_nullable(), false);
+        assert!(!restored.field(2).is_nullable());
         assert_eq!(
             restored.field(3).data_type(),
             &DataType::Timestamp(arrow::datatypes::TimeUnit::Nanosecond, None)
