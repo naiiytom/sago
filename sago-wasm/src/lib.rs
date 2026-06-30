@@ -142,6 +142,18 @@ mod tests {
     }
 
     #[test]
+    fn test_infer_semantic_empty_values_does_not_panic() {
+        // A JS caller may pass an empty sample; this must not panic.
+        assert_eq!(infer_semantic("col", Vec::new()), "Unknown");
+    }
+
+    #[test]
+    fn test_merkle_root_empty_is_stable_hex() {
+        let root = merkle_root(Vec::new());
+        assert_eq!(root.len(), 64);
+    }
+
+    #[test]
     fn test_merkle_root_deterministic_and_hex() {
         let a = merkle_root(vec!["x".into(), "y".into(), "z".into()]);
         let b = merkle_root(vec!["x".into(), "y".into(), "z".into()]);
