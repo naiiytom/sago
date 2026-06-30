@@ -4,6 +4,7 @@ members = [
     "sago-cli",
     "sago-sdk",
     "sago-proto",
+    "sago-wasm",
 ]
 resolver = "2"
 

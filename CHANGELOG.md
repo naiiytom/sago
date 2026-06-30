@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **WebAssembly support**: `sago-core` now has an `io` feature (enabled by
+  default) gating the PostgreSQL/S3 providers, the async runtime, and
+  filesystem state. With `default-features = false` the pure-analysis modules
+  (`semantic`, `drift`, `rename`, `merge`, `merkle`) compile to
+  `wasm32-unknown-unknown`. New `sago-wasm` crate exposes `infer_semantic`,
+  `merge_schemas`, and `merkle_root` to JavaScript via `wasm-bindgen` for
+  browser / edge execution.
 - **sago-proto gRPC interface**: `.proto` definitions for the `sago.v1` package
   (schema, drift, semantic types, `DiffReport`, and a `SagoService` with
   `GetSchema`/`Diff` RPCs). Compiled at build time with the **pure-Rust

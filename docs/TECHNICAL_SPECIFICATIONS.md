@@ -7,6 +7,8 @@
 - **PSI (Population Stability Index)**: Distribution-shift metric computed alongside the KS test in `detect_data_drift` (implemented — Phase 4B).
 - **Merkle Trees**: Verifiable data synchronization via SHA-256 Merkle commitments with inclusion proofs (implemented — Phase 5, `sago-core::merkle`).
 - **sha2**: SHA-256 implementation backing the Merkle commitments.
+- **wasm-bindgen**: JS/WebAssembly interop for the `sago-wasm` crate (Phase 5 WASM integration).
+- **protox**: Pure-Rust Protobuf compiler used by `sago-proto`'s `build.rs` (no system `protoc` required).
 - **sqlx**: Asynchronous SQL toolkit for database interactions.
 - **object_store**: Backend-agnostic object access used for S3 (Parquet/CSV/JSON).
 - **clap**: Command-line argument parser.
@@ -31,6 +33,8 @@ Sago is designed as a modular system with a core engine responsible for the heav
   - `ratatui`-based TUI (`sago explore`) for interactive exploration (implemented — Phase 4D).
 - **sago-sdk**:
   - `SagoClient` with a `snapshot` method and a one-shot `diff` free function; re-exports the core types (implemented — Phase 4E).
+- **sago-wasm**:
+  - WebAssembly bindings (`wasm-bindgen`) over the pure-analysis core: `infer_semantic`, `merge_schemas`, and `merkle_root`. Depends on `sago-core` with `default-features = false` so it builds for `wasm32-unknown-unknown` (browser / edge). Marked `publish = false`.
 - **sago-proto**:
   - gRPC/Protobuf definitions for a remote provider / plugin architecture (`sago.v1`: schema, drift, semantic types, `DiffReport`, and the `SagoService` service with `GetSchema`/`Diff` RPCs). The `.proto` source is compiled at build time by the **pure-Rust `protox`** compiler driving `tonic-prost-build` (`build.rs`), so the crate builds with no system `protoc`. Marked `publish = false`.
 

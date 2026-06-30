@@ -30,5 +30,5 @@
 - [x] **Semantic Smart Renaming**: Removed/added column pairs are recognised as renames using data type, inferred semantic type, distribution statistics, and name similarity, then folded into `SchemaDrift::renamed_fields` (wired into both `diff` and `plan`).
 - [x] **3-Way Merge**: `sago-core::merge::three_way_merge` reconciles two divergent schema edits against a common ancestor, auto-resolving non-conflicting changes and reporting add/add, modify/modify, and remove/modify conflicts.
 - [x] **Merkle Trees**: `sago-core::merkle::MerkleTree` provides SHA-256 commitments with domain-separated leaf/node hashing, a root digest, and inclusion proofs (`proof`/`verify_proof`) for verifiable data synchronization.
-- [ ] **WASM Integration**: Compile core logic to WebAssembly for browser-based tools or edge execution.
+- [x] **WASM Integration**: `sago-core` gained an `io` feature (default-on) that gates the data-source providers; with `default-features = false` the pure-analysis modules build for `wasm32-unknown-unknown`. The new `sago-wasm` crate exposes semantic inference, three-way schema merge, and Merkle roots to JavaScript via `wasm-bindgen`.
 - [ ] **Decentralized Data Architectures**: Support for distributed data mesh concepts.

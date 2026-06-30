@@ -1,0 +1,27 @@
+[package]
+name = "sago-wasm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "WebAssembly bindings for Sago's pure-analysis core (semantic typing, schema merge, Merkle commitments) for browser / edge execution."
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# Only the pure-analysis modules of sago-core; the IO providers are excluded so
+# the crate compiles to wasm32-unknown-unknown.
+sago-core = { path = "../sago-core", default-features = false }
+arrow = { workspace = true }
+wasm-bindgen = "0.2"
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde-wasm-bindgen = "0.6"
+
+[dev-dependencies]
+wasm-bindgen-test = "0.3"
