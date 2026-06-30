@@ -3493,7 +3493,6 @@ dependencies = [
 name = "sago-core"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "arrow",
  "async-trait",
  "bytes",
@@ -3509,7 +3508,6 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "toml",
- "tracing",
 ]
 
 [[package]]
