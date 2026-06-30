@@ -7,11 +7,17 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-description = "Placeholder for Sago's gRPC/Protobuf plugin interface definitions (not yet implemented)."
+description = "gRPC/Protobuf plugin interface definitions for Sago (compiled with the pure-Rust protox toolchain — no system protoc required)."
 publish = false
 
-# NOTE: This crate is an intentional placeholder. The gRPC/Protobuf service
-# definitions are tracked under Phase 4 of docs/ROADMAP.md and are blocked on a
-# `protoc` toolchain. When implemented, re-add `prost`, `tonic`, and a
-# `tonic-build` build-dependency wired to a `build.rs`.
 [dependencies]
+prost = "0.14"
+tonic = "0.14"
+tonic-prost = "0.14"
+
+[build-dependencies]
+# protox is a pure-Rust protobuf compiler: it parses the .proto files and emits
+# a FileDescriptorSet without any system `protoc` binary. tonic-prost-build then
+# generates the Rust bindings from that descriptor set.
+protox = "0.9"
+tonic-prost-build = "0.14"

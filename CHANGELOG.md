@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **sago-proto gRPC interface**: `.proto` definitions for the `sago.v1` package
+  (schema, drift, semantic types, `DiffReport`, and a `SagoService` with
+  `GetSchema`/`Diff` RPCs). Compiled at build time with the **pure-Rust
+  `protox`** compiler driving `tonic-prost-build`, so the crate builds with no
+  system `protoc` toolchain — unblocking the item previously deferred for that
+  reason. Generates both client and server stubs.
 - **Three-way schema merge** (`sago-core::merge`): `three_way_merge(base, ours,
   theirs)` reconciles two independently evolved schemas against their common
   ancestor. Non-conflicting changes (one-sided edits, identical edits, shared

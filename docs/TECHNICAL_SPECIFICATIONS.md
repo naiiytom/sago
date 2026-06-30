@@ -32,7 +32,7 @@ Sago is designed as a modular system with a core engine responsible for the heav
 - **sago-sdk**:
   - `SagoClient` with a `snapshot` method and a one-shot `diff` free function; re-exports the core types (implemented — Phase 4E).
 - **sago-proto**:
-  - gRPC/Protobuf definitions for a future microservice or plugin architecture. Intentional placeholder — no `.proto` files yet, blocked on a `protoc` toolchain (Phase 4 / Phase 5). Marked `publish = false`.
+  - gRPC/Protobuf definitions for a remote provider / plugin architecture (`sago.v1`: schema, drift, semantic types, `DiffReport`, and the `SagoService` service with `GetSchema`/`Diff` RPCs). The `.proto` source is compiled at build time by the **pure-Rust `protox`** compiler driving `tonic-prost-build` (`build.rs`), so the crate builds with no system `protoc`. Marked `publish = false`.
 
 ## Known Limitations
 - S3 provider supports Parquet, CSV, and NDJSON/JSON, selected by file extension or an explicit `format` override; other formats are not yet supported.

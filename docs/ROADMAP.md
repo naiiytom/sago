@@ -24,7 +24,7 @@
 - [x] **Additional S3 Formats**: CSV and NDJSON support added to `S3SchemaProvider` with extension-based auto-detection and optional `format` override in config (Phase 4C).
 - [x] **TUI**: `sago explore` subcommand with ratatui list/detail UI, keyboard navigation, and `TestBackend`-based unit tests (Phase 4D).
 - [x] **sago-sdk**: `SagoClient` with `snapshot` method and `diff` free function; re-exports all core types (Phase 4E).
-- [ ] **sago-proto**: Define `.proto` files and gRPC service definitions — blocked on `protoc` installation.
+- [x] **sago-proto**: `.proto` message/service definitions for `sago.v1` (schema, drift, semantic types, diff report, `SagoService` gRPC). Compiled with the **pure-Rust `protox`** toolchain via `build.rs` + `tonic-prost-build`, so no system `protoc` is required.
 
 ## Phase 5: Future Directions
 - [x] **Semantic Smart Renaming**: Removed/added column pairs are recognised as renames using data type, inferred semantic type, distribution statistics, and name similarity, then folded into `SchemaDrift::renamed_fields` (wired into both `diff` and `plan`).

@@ -1,0 +1,121 @@
+syntax = "proto3";
+
+// Sago plugin / microservice interface.
+//
+// These definitions mirror the core domain types in `sago-core` (schema drift,
+// semantic types, drift metrics, snapshots) so a remote provider or plugin can
+// expose the same capabilities over gRPC. They are compiled with the pure-Rust
+// `protox` compiler at build time, so no system `protoc` toolchain is required.
+package sago.v1;
+
+// ── Schema ───────────────────────────────────────────────────────────────────
+
+// A single column in a dataset schema.
+message Field {
+  string name = 1;
+  // Arrow data type, in the debug form used throughout sago (e.g. "Int64", "Utf8").
+  string data_type = 2;
+  bool nullable = 3;
+}
+
+// An ordered set of fields describing a dataset.
+message Schema {
+  repeated Field fields = 1;
+}
+
+// Inferred semantic meaning of a column's values.
+enum SemanticType {
+  SEMANTIC_TYPE_UNSPECIFIED = 0;
+  SEMANTIC_TYPE_UNKNOWN = 1;
+  SEMANTIC_TYPE_EMAIL = 2;
+  SEMANTIC_TYPE_CREDIT_CARD = 3;
+  SEMANTIC_TYPE_PHONE_NUMBER = 4;
+  SEMANTIC_TYPE_UUID = 5;
+  SEMANTIC_TYPE_IP_ADDRESS = 6;
+  SEMANTIC_TYPE_URL = 7;
+}
+
+// ── Drift ──────────────────────────────────────────────────────────────────────
+
+message TypeChange {
+  string field_name = 1;
+  string old_type = 2;
+  string new_type = 3;
+}
+
+message SemanticDrift {
+  string field_name = 1;
+  SemanticType source_type = 2;
+  SemanticType target_type = 3;
+}
+
+// A column recognised as a rename of a removed column (semantic smart renaming).
+message FieldRename {
+  string from = 1;
+  string to = 2;
+  double confidence = 3;
+}
+
+message SchemaDrift {
+  repeated string added_fields = 1;
+  repeated string removed_fields = 2;
+  repeated TypeChange changed_types = 3;
+  repeated SemanticDrift semantic_drifts = 4;
+  repeated FieldRename renamed_fields = 5;
+}
+
+message ColumnStats {
+  uint64 null_count = 1;
+  uint64 row_count = 2;
+  optional double mean = 3;
+  optional double min = 4;
+  optional double max = 5;
+}
+
+message ColumnDrift {
+  ColumnStats source_stats = 1;
+  ColumnStats target_stats = 2;
+  optional double mean_drift = 3;
+  int64 null_count_drift = 4;
+  optional double ks_statistic = 5;
+  optional double ks_p_value = 6;
+  optional double psi_statistic = 7;
+}
+
+message DataDrift {
+  map<string, ColumnDrift> column_drifts = 1;
+}
+
+// The full result of comparing two datasets.
+message DiffReport {
+  string source_identifier = 1;
+  string target_identifier = 2;
+  SchemaDrift schema_drift = 3;
+  repeated SemanticDrift semantic_drifts = 4;
+  DataDrift data_drift = 5;
+}
+
+// ── Service ──────────────────────────────────────────────────────────────────
+
+message GetSchemaRequest {
+  string identifier = 1;
+}
+
+message GetSchemaResponse {
+  Schema schema = 1;
+}
+
+message DiffRequest {
+  string source_identifier = 1;
+  string target_identifier = 2;
+}
+
+message DiffResponse {
+  DiffReport report = 1;
+}
+
+// A remote data-reliability provider: fetch schemas and compute diffs over gRPC.
+service SagoService {
+  rpc GetSchema(GetSchemaRequest) returns (GetSchemaResponse);
+  rpc Diff(DiffRequest) returns (DiffResponse);
+}
