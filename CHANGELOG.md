@@ -5,6 +5,20 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Semantic smart renaming** (`sago-core::rename`): removed/added column pairs
+  are recognised as renames rather than a drop + add by comparing data type
+  (a hard gate), inferred semantic type, distribution statistics, and name
+  similarity (token Jaccard blended with normalised Levenshtein via `max`).
+  Confident, greedy 1:1 matches are folded out of `added_fields`/`removed_fields`
+  into the new `SchemaDrift::renamed_fields` (`#[serde(default)]`, backward
+  compatible). Wired into both `sago diff` (profiles built from record batches)
+  and `sago plan` (profiles built from the persisted snapshot), surfaced in the
+  terminal report, and re-exported from `sago-sdk`.
+
 ## [0.1.0] - 2026-06-30
 
 First public release. Sago brings Infrastructure-as-Code principles to DataOps:

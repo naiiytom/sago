@@ -27,7 +27,7 @@
 - [ ] **sago-proto**: Define `.proto` files and gRPC service definitions — blocked on `protoc` installation.
 
 ## Phase 5: Future Directions
-- [ ] **Semantic Smart Renaming**: Intelligently handle column renames without breaking pipelines.
+- [x] **Semantic Smart Renaming**: Removed/added column pairs are recognised as renames using data type, inferred semantic type, distribution statistics, and name similarity, then folded into `SchemaDrift::renamed_fields` (wired into both `diff` and `plan`).
 - [ ] **3-Way Merge**: Handle conflicting schema changes gracefully.
 - [ ] **Merkle Trees**: Verifiable data synchronization using Merkle tree commitments (PSI is tracked under Phase 4).
 - [ ] **WASM Integration**: Compile core logic to WebAssembly for browser-based tools or edge execution.

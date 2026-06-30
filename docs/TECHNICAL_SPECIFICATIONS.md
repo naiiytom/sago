@@ -21,6 +21,7 @@ Sago is designed as a modular system with a core engine responsible for the heav
   - Diff Engine (`diff` module): Orchestrates cross-modal comparison using both providers.
   - Drift Detector (`drift` module): Statistical analysis — schema drift, data drift, KS test.
   - Semantic Analyzer (`semantic` module): Infers column semantic types (email, credit card, UUID, etc.).
+  - Rename Detector (`rename` module): Recognises that a removed/added column pair is actually a rename by comparing data type (gate), inferred semantic type, distribution statistics, and name similarity (token Jaccard blended with normalised Levenshtein). Confident, greedy 1:1 matches are folded out of `added_fields`/`removed_fields` into `SchemaDrift::renamed_fields`. Used by both `diff` (profiles built from record batches) and `plan` (profiles built from the persisted snapshot).
 - **sago-cli**:
   - `clap`-based CLI for `init`, `apply`, `plan`, `diff` — wired against `sago-core` as of Phase 4A.
   - State persisted at `.sago/state.json`; plan artifacts at `.sago/plans/<timestamp>.json`.
@@ -36,3 +37,4 @@ Sago is designed as a modular system with a core engine responsible for the heav
 - PSI is computed with 10 equal-width bins; very skewed distributions may benefit from quantile binning (future work).
 - Semantic type inference samples the first 100 values per column only.
 - `plan` compares persisted column statistics against a freshly captured snapshot, so it reports schema, semantic, mean, and null-count drift; full-distribution metrics (KS, PSI) are produced only by `diff`, which reads complete record batches from both sides.
+- Rename detection requires an exact data-type match (the type gate) and a blended confidence ≥ 0.6; type-changing renames and very low-signal pairs (unrelated names, no semantics, no comparable stats) are left as separate add/remove entries. Matching is greedy 1:1, so an ambiguous many-to-many rename resolves to the highest-confidence non-conflicting pairing.

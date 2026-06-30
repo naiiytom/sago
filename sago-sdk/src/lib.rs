@@ -4,6 +4,7 @@ pub mod client;
 pub use sago_core::config::ConnectionConfig;
 pub use sago_core::diff::DiffReport;
 pub use sago_core::drift::{ColumnDrift, ColumnStats, DataDrift, SchemaDrift, SemanticDrift};
+pub use sago_core::rename::{ColumnProfile, FieldRename, RenameOptions, RenameSignals};
 pub use sago_core::semantic::SemanticType;
 pub use sago_core::state::TargetSnapshot;
 
@@ -60,6 +61,7 @@ mod tests {
                 removed_fields: vec![],
                 changed_types: vec![],
                 semantic_drifts: vec![],
+                renamed_fields: vec![],
             },
             data_drift: DataDrift {
                 column_drifts: HashMap::new(),

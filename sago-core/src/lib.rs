@@ -29,6 +29,7 @@ pub mod connection;
 pub mod diff;
 pub mod drift;
 pub mod postgres;
+pub mod rename;
 pub mod s3;
 pub mod semantic;
 pub mod state;
