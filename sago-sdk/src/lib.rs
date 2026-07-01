@@ -10,6 +10,10 @@ pub use sago_core::rename::{ColumnProfile, FieldRename, RenameOptions, RenameSig
 pub use sago_core::semantic::SemanticType;
 pub use sago_core::state::TargetSnapshot;
 
+// Re-export the core error/result types so SDK consumers get a stable, typed
+// error surface and are not forced to depend on `anyhow`.
+pub use sago_core::{Result, SagoError};
+
 pub use client::SagoClient;
 
 /// One-shot diff between two arbitrary endpoints.
@@ -18,19 +22,13 @@ pub async fn diff(
     source_id: &str,
     target_cfg: &ConnectionConfig,
     target_id: &str,
-) -> anyhow::Result<DiffReport> {
+) -> Result<DiffReport> {
     use sago_core::connection::build_provider;
     use sago_core::diff::diff_datasets;
 
-    let source = build_provider(source_cfg)
-        .await
-        .map_err(|e| anyhow::anyhow!(e))?;
-    let target = build_provider(target_cfg)
-        .await
-        .map_err(|e| anyhow::anyhow!(e))?;
-    diff_datasets(source, source_id, target, target_id)
-        .await
-        .map_err(|e| anyhow::anyhow!(e))
+    let source = build_provider(source_cfg).await?;
+    let target = build_provider(target_cfg).await?;
+    diff_datasets(source, source_id, target, target_id).await
 }
 
 #[cfg(test)]

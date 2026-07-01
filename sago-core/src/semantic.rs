@@ -54,6 +54,18 @@ pub fn infer_semantic_type(column_name: &str, array: &dyn Array) -> SemanticType
         return SemanticType::Url;
     }
 
+    // Secondary phone hints. `phone` itself is handled by the early return
+    // above; these catch phone-shaped columns whose name doesn't contain
+    // "phone" but is still an unambiguous phone hint, so the data vote can
+    // safely classify them. A bare numeric column with none of these stays
+    // Unknown rather than being mislabelled a phone number.
+    let name_hints_phone = ["mobile", "msisdn", "fax", "telephone"]
+        .iter()
+        .any(|h| lower_name.contains(h))
+        || lower_name
+            .split(|c: char| !c.is_alphanumeric())
+            .any(|seg| seg == "tel" || seg == "cell");
+
     if (array.data_type() == &DataType::Utf8 || array.data_type() == &DataType::LargeUtf8)
         && let Some(string_array) = array.as_any().downcast_ref::<StringArray>()
     {
@@ -94,7 +106,13 @@ pub fn infer_semantic_type(column_name: &str, array: &dyn Array) -> SemanticType
                 return SemanticType::Email;
             } else if (cc_count as f32) >= threshold {
                 return SemanticType::CreditCard;
-            } else if (phone_count as f32) >= threshold {
+            } else if (phone_count as f32) >= threshold && name_hints_phone {
+                // The phone regex matches any 2–15 digit integer (optionally
+                // `+`-prefixed), so plain numeric ID/count/code columns would
+                // otherwise be misclassified as phone numbers. Only accept the
+                // phone vote when the column *name* also hints at a phone; the
+                // name-based branch above already returns early for obvious cases
+                // like `phone`, so this guards the ambiguous ones.
                 return SemanticType::PhoneNumber;
             } else if (uuid_count as f32) >= threshold {
                 return SemanticType::UUID;
@@ -211,7 +229,7 @@ mod tests {
     }
 
     #[test]
-    fn test_infer_by_data_phone() {
+    fn test_infer_by_data_phone_requires_name_hint() {
         let array = StringArray::from(vec![
             Some("+14155552671"),
             Some("+442071234567"),
@@ -219,10 +237,31 @@ mod tests {
             Some("+14155552672"),
             Some("+14155552673"),
         ]);
+        // With a secondary phone hint in the name, the data vote classifies it.
         assert_eq!(
-            infer_semantic_type("unknown_col", &array),
+            infer_semantic_type("mobile", &array),
             SemanticType::PhoneNumber
         );
+        // Without any phone hint, phone-shaped digits must NOT be labelled a
+        // phone number (they could be IDs, order numbers, etc.).
+        assert_eq!(
+            infer_semantic_type("unknown_col", &array),
+            SemanticType::Unknown
+        );
+    }
+
+    #[test]
+    fn test_numeric_id_column_not_misclassified_as_phone() {
+        // Regression: short unhinted numeric strings (e.g. a `code` column) must
+        // stay Unknown even though they match the permissive phone regex.
+        let array = StringArray::from(vec![
+            Some("12345"),
+            Some("67890"),
+            Some("24680"),
+            Some("13579"),
+            Some("11223"),
+        ]);
+        assert_eq!(infer_semantic_type("code", &array), SemanticType::Unknown);
     }
 
     #[test]

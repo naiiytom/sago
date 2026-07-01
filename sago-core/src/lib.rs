@@ -12,11 +12,29 @@ pub enum SagoError {
     #[error("Database error: {0}")]
     Database(#[from] sqlx::Error),
 
+    /// TOML deserialization failure (syntax, unknown field, missing field).
+    #[error("TOML parse error: {0}")]
+    TomlParse(#[from] toml::de::Error),
+
+    /// JSON (de)serialization failure — e.g. reading or writing the state file.
+    #[error("JSON error: {0}")]
+    Json(#[from] serde_json::Error),
+
+    /// A semantically-invalid configuration that parsed fine (e.g. an obsolete
+    /// block). Reserve for genuine config-logic errors, not parse failures.
     #[error("Configuration error: {0}")]
     Config(String),
 
     #[error("Schema error: {0}")]
     Schema(String),
+
+    /// A persisted Arrow data type that the state codec cannot parse back.
+    #[error("unsupported serialized data type: {0}")]
+    UnsupportedDataType(String),
+
+    /// The on-disk state file was written by an incompatible version of sago.
+    #[error("unsupported state schema_version: {found} (expected {expected})")]
+    UnsupportedStateVersion { found: u32, expected: u32 },
 
     #[error("Arrow error: {0}")]
     Arrow(#[from] arrow::error::ArrowError),
@@ -31,6 +49,7 @@ pub mod drift;
 pub mod merge;
 pub mod merkle;
 pub mod rename;
+pub mod schema_codec;
 pub mod semantic;
 
 // Data-source providers and filesystem state persistence require the async

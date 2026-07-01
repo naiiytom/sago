@@ -17,7 +17,6 @@ sago-core = { path = "../sago-core", version = "0.1.0" }
 async-trait.workspace = true
 arrow.workspace = true
 tokio.workspace = true
-anyhow.workspace = true
 serde.workspace = true
 
 [dev-dependencies]

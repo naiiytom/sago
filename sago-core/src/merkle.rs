@@ -187,6 +187,7 @@ impl MerkleTree {
 /// Verify that `leaf` is included in the tree committing to `root`, given
 /// `proof`. The proof's sibling hashes are folded into the leaf hash and the
 /// final value is compared against `root`.
+#[must_use = "the verification result must be checked; ignoring it defeats the proof"]
 pub fn verify_proof(root: &Hash, leaf: &Hash, proof: &InclusionProof) -> bool {
     let mut acc = *leaf;
     for step in &proof.steps {
