@@ -3525,7 +3525,6 @@ dependencies = [
 name = "sago-sdk"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "arrow",
  "async-trait",
  "sago-core",

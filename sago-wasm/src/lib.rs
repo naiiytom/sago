@@ -11,12 +11,13 @@
 //! `serde-wasm-bindgen`; scalars use plain strings.
 
 use arrow::array::StringArray;
-use arrow::datatypes::{DataType, Field, Schema};
+use arrow::datatypes::{Field, Schema};
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 
 use sago_core::merge::{MergeConflict, three_way_merge};
 use sago_core::merkle::MerkleTree;
+use sago_core::schema_codec::{parse_data_type, serialize_data_type};
 use sago_core::semantic::infer_semantic_type;
 
 /// A JS-facing field definition: name, Arrow data type (debug form, e.g.
@@ -74,7 +75,7 @@ pub fn merge_schemas(base: JsValue, ours: JsValue, theirs: JsValue) -> Result<Js
             .iter()
             .map(|f| WasmField {
                 name: f.name().clone(),
-                data_type: format!("{:?}", f.data_type()),
+                data_type: serialize_data_type(f.data_type()),
                 nullable: f.is_nullable(),
             })
             .collect(),
@@ -88,37 +89,18 @@ fn to_js_err(msg: String) -> JsValue {
     JsValue::from_str(&msg)
 }
 
-/// Build an Arrow [`Schema`] from JS field definitions, parsing the common
-/// primitive type names. (A self-contained parser so the wasm crate needs none
-/// of the I/O-gated state module.)
+/// Build an Arrow [`Schema`] from JS field definitions, parsing type names via
+/// the shared [`sago_core::schema_codec`] so the wasm crate and the native state
+/// module accept exactly the same type strings.
 fn build_schema(fields: &[WasmField]) -> Result<Schema, String> {
     let parsed: Result<Vec<Field>, String> = fields
         .iter()
         .map(|f| {
-            Ok(Field::new(
-                &f.name,
-                parse_data_type(&f.data_type)?,
-                f.nullable,
-            ))
+            let dt = parse_data_type(&f.data_type).map_err(|e| e.to_string())?;
+            Ok(Field::new(&f.name, dt, f.nullable))
         })
         .collect();
     Ok(Schema::new(parsed?))
-}
-
-fn parse_data_type(s: &str) -> Result<DataType, String> {
-    match s {
-        "Boolean" => Ok(DataType::Boolean),
-        "Int16" => Ok(DataType::Int16),
-        "Int32" => Ok(DataType::Int32),
-        "Int64" => Ok(DataType::Int64),
-        "Float32" => Ok(DataType::Float32),
-        "Float64" => Ok(DataType::Float64),
-        "Utf8" => Ok(DataType::Utf8),
-        "LargeUtf8" => Ok(DataType::LargeUtf8),
-        "Binary" => Ok(DataType::Binary),
-        "Date32" => Ok(DataType::Date32),
-        other => Err(format!("unsupported data type: {other}")),
-    }
 }
 
 #[cfg(test)]

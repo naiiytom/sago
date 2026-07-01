@@ -34,7 +34,9 @@ enum Commands {
 }
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> anyhow::Result<std::process::ExitCode> {
+    use std::process::ExitCode;
+
     let cli = Cli::parse();
     let subscriber = FmtSubscriber::builder()
         .with_max_level(cli.log_level)
@@ -42,10 +44,15 @@ async fn main() -> anyhow::Result<()> {
     tracing::subscriber::set_global_default(subscriber).expect("setting subscriber failed");
 
     match &cli.command {
-        Commands::Init(a) => commands::init::run(a).await,
-        Commands::Apply(a) => commands::apply::run(a).await,
+        Commands::Init(a) => commands::init::run(a).await.map(|()| ExitCode::SUCCESS),
+        Commands::Apply(a) => commands::apply::run(a).await.map(|()| ExitCode::SUCCESS),
+        // `plan` returns a non-zero ExitCode when drift breaches the configured
+        // threshold, so CI can gate on it.
         Commands::Plan(a) => commands::plan::run(a).await,
-        Commands::Diff(a) => commands::diff::run(a).await,
-        Commands::Explore => Ok(commands::explore::run()?),
+        Commands::Diff(a) => commands::diff::run(a).await.map(|()| ExitCode::SUCCESS),
+        Commands::Explore => {
+            commands::explore::run()?;
+            Ok(ExitCode::SUCCESS)
+        }
     }
 }

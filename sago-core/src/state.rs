@@ -5,6 +5,7 @@ use arrow::datatypes::{DataType, Field, Schema};
 use serde::{Deserialize, Serialize};
 
 use crate::drift::{ColumnStats, calculate_column_stats, extract_numeric_values};
+use crate::schema_codec::{parse_data_type, serialize_data_type};
 use crate::semantic::{SemanticType, infer_semantic_type};
 use crate::{DataProvider, Result, SagoError};
 
@@ -28,7 +29,7 @@ impl From<&Schema> for SerializableSchema {
                 .iter()
                 .map(|f| SerializableField {
                     name: f.name().clone(),
-                    data_type: format!("{:?}", f.data_type()),
+                    data_type: serialize_data_type(f.data_type()),
                     nullable: f.is_nullable(),
                 })
                 .collect(),
@@ -47,42 +48,6 @@ impl SerializableSchema {
             })
             .collect();
         Ok(Schema::new(fields?))
-    }
-}
-
-fn parse_data_type(s: &str) -> Result<DataType> {
-    // Supports the types produced by PostgresSchemaProvider and Parquet primitives
-    // we round-trip today. Extend as new types are needed.
-    match s {
-        "Boolean" => Ok(DataType::Boolean),
-        "Int16" => Ok(DataType::Int16),
-        "Int32" => Ok(DataType::Int32),
-        "Int64" => Ok(DataType::Int64),
-        "Float32" => Ok(DataType::Float32),
-        "Float64" => Ok(DataType::Float64),
-        "Utf8" => Ok(DataType::Utf8),
-        "LargeUtf8" => Ok(DataType::LargeUtf8),
-        "Binary" => Ok(DataType::Binary),
-        "Date32" => Ok(DataType::Date32),
-        "Timestamp(Nanosecond, None)" => Ok(DataType::Timestamp(
-            arrow::datatypes::TimeUnit::Nanosecond,
-            None,
-        )),
-        other if other.starts_with("Timestamp(Nanosecond, Some(") => {
-            // Extract timezone from debug repr: Timestamp(Nanosecond, Some("tz"))
-            let tz = other
-                .trim_start_matches("Timestamp(Nanosecond, Some(\"")
-                .trim_end_matches("\"))")
-                .to_string();
-            Ok(DataType::Timestamp(
-                arrow::datatypes::TimeUnit::Nanosecond,
-                Some(tz.into()),
-            ))
-        }
-        other => Err(SagoError::Schema(format!(
-            "unsupported serialized data type: {}",
-            other
-        ))),
     }
 }
 
@@ -112,45 +77,50 @@ impl ProjectState {
     }
 
     pub fn load(path: &Path) -> Result<Self> {
-        let bytes = std::fs::read(path).map_err(SagoError::Io)?;
-        let state: ProjectState =
-            serde_json::from_slice(&bytes).map_err(|e| SagoError::Config(e.to_string()))?;
-        if state.schema_version != CURRENT_SCHEMA_VERSION {
-            return Err(SagoError::Config(format!(
-                "unsupported state schema_version: {} (expected {})",
-                state.schema_version, CURRENT_SCHEMA_VERSION
-            )));
-        }
-        Ok(state)
+        let bytes = std::fs::read(path)?;
+        Self::from_slice(&bytes)
     }
 
     pub fn load_or_default(path: &Path) -> Result<Self> {
         match std::fs::read(path) {
-            Ok(bytes) => {
-                let state: ProjectState =
-                    serde_json::from_slice(&bytes).map_err(|e| SagoError::Config(e.to_string()))?;
-                if state.schema_version != CURRENT_SCHEMA_VERSION {
-                    return Err(SagoError::Config(format!(
-                        "unsupported state schema_version: {} (expected {})",
-                        state.schema_version, CURRENT_SCHEMA_VERSION
-                    )));
-                }
-                Ok(state)
-            }
+            Ok(bytes) => Self::from_slice(&bytes),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::empty()),
             Err(e) => Err(SagoError::Io(e)),
         }
+    }
+
+    /// Deserialize and version-check a state document from raw JSON bytes.
+    fn from_slice(bytes: &[u8]) -> Result<Self> {
+        let state: ProjectState = serde_json::from_slice(bytes)?;
+        if state.schema_version != CURRENT_SCHEMA_VERSION {
+            return Err(SagoError::UnsupportedStateVersion {
+                found: state.schema_version,
+                expected: CURRENT_SCHEMA_VERSION,
+            });
+        }
+        Ok(state)
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(SagoError::Io)?;
         }
-        let json =
-            serde_json::to_string_pretty(self).map_err(|e| SagoError::Config(e.to_string()))?;
-        std::fs::write(path, json).map_err(SagoError::Io)?;
+        let json = serde_json::to_string_pretty(self)?;
+        // Write to a sibling temp file then atomically rename over the target so
+        // an interrupted write (crash, full disk) can never truncate a
+        // previously-valid state.json.
+        let tmp = tmp_sibling(path);
+        std::fs::write(&tmp, json).map_err(SagoError::Io)?;
+        std::fs::rename(&tmp, path).map_err(SagoError::Io)?;
         Ok(())
     }
+}
+
+/// A temp path alongside `path` for the write-then-rename in [`ProjectState::save`].
+fn tmp_sibling(path: &Path) -> std::path::PathBuf {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(".tmp");
+    path.with_file_name(name)
 }
 
 /// Capture a snapshot of `identifier` from `provider`.
@@ -282,8 +252,8 @@ mod tests {
         };
         let err = s.to_arrow_schema().unwrap_err();
         match err {
-            SagoError::Schema(msg) => assert!(msg.contains("unsupported")),
-            other => panic!("expected Schema error, got {:?}", other),
+            SagoError::UnsupportedDataType(msg) => assert!(msg.contains("List")),
+            other => panic!("expected UnsupportedDataType error, got {:?}", other),
         }
     }
 
@@ -344,6 +314,34 @@ mod tests {
     }
 
     #[test]
+    fn test_save_is_atomic_and_overwrites() {
+        // Saving over an existing state file must replace it wholesale (via the
+        // temp+rename path) and leave no stray temp file behind.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+
+        ProjectState::empty().save(&path).unwrap();
+
+        let mut state = ProjectState::empty();
+        state.snapshots.insert(
+            "t".into(),
+            TargetSnapshot {
+                captured_at: "2026-01-01T00:00:00Z".into(),
+                schema: SerializableSchema { fields: vec![] },
+                column_stats: HashMap::new(),
+                semantic_types: HashMap::new(),
+                samples: None,
+            },
+        );
+        state.save(&path).unwrap();
+
+        let reloaded = ProjectState::load(&path).unwrap();
+        assert_eq!(reloaded.snapshots.len(), 1);
+        // No leftover temp sibling.
+        assert!(!path.with_file_name("state.json.tmp").exists());
+    }
+
+    #[test]
     fn test_load_missing_file_returns_default() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nope.json");
@@ -359,8 +357,11 @@ mod tests {
         std::fs::write(&path, r#"{"schema_version": 99, "snapshots": {}}"#).unwrap();
         let err = ProjectState::load(&path).unwrap_err();
         match err {
-            SagoError::Config(msg) => assert!(msg.contains("schema_version")),
-            other => panic!("expected Config error, got {:?}", other),
+            SagoError::UnsupportedStateVersion { found, expected } => {
+                assert_eq!(found, 99);
+                assert_eq!(expected, CURRENT_SCHEMA_VERSION);
+            }
+            other => panic!("expected UnsupportedStateVersion error, got {:?}", other),
         }
     }
 

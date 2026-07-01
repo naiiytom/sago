@@ -3,6 +3,7 @@ use serde::Deserialize;
 use std::collections::HashMap;
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     pub project: ProjectConfig,
     pub connections: HashMap<String, ConnectionConfig>,
@@ -74,12 +75,19 @@ pub struct ChecksConfig {
 
 impl Config {
     pub fn from_toml(content: &str) -> Result<Self> {
-        if content.contains("[schema]") {
+        // Detect the obsolete top-level `[schema]` table *structurally* rather
+        // than by scanning the raw text: a naive `content.contains("[schema]")`
+        // also fires on the literal appearing in a comment or inside a string
+        // value (e.g. `identifier = "events_[schema]_v2"`), rejecting valid
+        // configs. Parse into a generic value first and check for a real
+        // top-level `schema` key.
+        let value: toml::Value = toml::from_str(content)?;
+        if value.get("schema").is_some() {
             return Err(crate::SagoError::Config(
                 "config uses obsolete [schema] block — replace with [targets.<name>] entries; see docs".into(),
             ));
         }
-        toml::from_str(content).map_err(|e| crate::SagoError::Config(e.to_string()))
+        Ok(value.try_into()?)
     }
 }
 
@@ -242,6 +250,58 @@ drift_threshold = 0.05
             }
             other => panic!("expected Config error, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_schema_substring_in_value_is_not_rejected() {
+        // Regression: the literal "[schema]" appearing inside a string value or a
+        // comment must NOT be mistaken for the obsolete top-level [schema] table.
+        let toml = r#"
+# migration note: the old [schema] block is gone
+[project]
+name = "p"
+version = "1"
+
+[connections.archive]
+type = "s3"
+bucket = "b"
+region = "r"
+
+[targets.t]
+connection = "archive"
+identifier = "events_[schema]_v2.parquet"
+
+[checks]
+drift_threshold = 0.05
+"#;
+        let cfg = Config::from_toml(toml).expect("valid config must not be rejected");
+        assert_eq!(cfg.targets["t"].identifier, "events_[schema]_v2.parquet");
+    }
+
+    #[test]
+    fn test_unknown_field_rejected() {
+        // deny_unknown_fields guards against silent typos in top-level keys.
+        let toml = r#"
+[project]
+name = "p"
+version = "1"
+
+[connections.c]
+type = "s3"
+bucket = "b"
+region = "r"
+
+[targets.t]
+connection = "c"
+identifier = "x"
+
+[checks]
+drift_threshold = 0.05
+
+[bogus]
+whatever = true
+"#;
+        assert!(Config::from_toml(toml).is_err());
     }
 
     #[test]

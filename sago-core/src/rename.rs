@@ -22,6 +22,7 @@ use arrow::record_batch::RecordBatch;
 use serde::{Deserialize, Serialize};
 
 use crate::drift::{ColumnStats, SchemaDrift, calculate_column_stats};
+use crate::schema_codec::serialize_data_type;
 use crate::semantic::{SemanticType, infer_semantic_type};
 
 /// The signals about a single column that survive a rename and can therefore be
@@ -67,6 +68,13 @@ pub struct RenameOptions {
     pub min_confidence: f64,
     /// Require an exact data-type match before a pair is even considered.
     pub require_type_match: bool,
+    /// When *name similarity is the only available signal* (both columns have an
+    /// `Unknown` semantic type and neither exposes numeric stats), require at
+    /// least this name similarity. Without corroboration, the blended confidence
+    /// degenerates to the raw name similarity, so two merely-similar names
+    /// (e.g. `created` ↔ `updated`) could otherwise clear `min_confidence` and be
+    /// declared a rename on a coincidental spelling overlap. Held to a higher bar.
+    pub min_name_only_similarity: f64,
 }
 
 impl Default for RenameOptions {
@@ -74,6 +82,7 @@ impl Default for RenameOptions {
         RenameOptions {
             min_confidence: 0.6,
             require_type_match: true,
+            min_name_only_similarity: 0.85,
         }
     }
 }
@@ -104,7 +113,7 @@ pub fn profile_columns(
         profiles.insert(
             name.clone(),
             ColumnProfile {
-                data_type: format!("{:?}", field.data_type()),
+                data_type: serialize_data_type(field.data_type()),
                 semantic_type: semantic_types
                     .get(name)
                     .cloned()
@@ -135,7 +144,7 @@ pub fn profile_columns_from_batches(batches: &[RecordBatch]) -> HashMap<String, 
         profiles.insert(
             name.clone(),
             ColumnProfile {
-                data_type: format!("{:?}", field.data_type()),
+                data_type: serialize_data_type(field.data_type()),
                 semantic_type,
                 stats: calculate_column_stats(batches, name),
             },
@@ -270,6 +279,14 @@ fn score_pair(
     let confidence = weighted / total_weight;
 
     if confidence < opts.min_confidence {
+        return None;
+    }
+
+    // Name-only match (no semantic agreement, no stats to compare): demand a
+    // stricter name-similarity floor so a coincidental spelling overlap can't
+    // masquerade as a rename on the strength of the name signal alone.
+    let name_only = !semantic_known && stats_similarity.is_none();
+    if name_only && name_similarity < opts.min_name_only_similarity {
         return None;
     }
 
@@ -557,6 +574,31 @@ mod tests {
         let opts = RenameOptions::default();
         let r = score_pair("customer_id", &from, "customerid", &to, &opts);
         assert!(r.is_some());
+    }
+
+    #[test]
+    fn test_score_pair_name_only_weak_match_rejected() {
+        // No semantics, no stats, and only a moderate name overlap. This clears
+        // the raw 0.6 confidence gate (confidence == name_similarity here) but
+        // must be rejected by the stricter name-only floor: without corroborating
+        // evidence, "created" ↔ "updated" is not a rename.
+        let from = profile("Utf8", SemanticType::Unknown, None);
+        let to = profile("Utf8", SemanticType::Unknown, None);
+        let opts = RenameOptions::default();
+        assert!(
+            score_pair("created", &from, "updated", &to, &opts).is_none(),
+            "moderate name-only overlap must not auto-accept as a rename"
+        );
+    }
+
+    #[test]
+    fn test_score_pair_name_only_exact_normalized_still_accepts() {
+        // The name-only floor must still admit a near-certain name match
+        // (normalized-equal), which is the legitimate rename case.
+        let from = profile("Int64", SemanticType::Unknown, None);
+        let to = profile("Int64", SemanticType::Unknown, None);
+        let opts = RenameOptions::default();
+        assert!(score_pair("customer_id", &from, "customerid", &to, &opts).is_some());
     }
 
     #[test]

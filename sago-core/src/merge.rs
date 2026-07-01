@@ -61,7 +61,13 @@ pub struct MergeConflict {
 }
 
 /// Outcome of a three-way merge: the reconciled schema plus any conflicts.
+///
+/// `#[must_use]`: the `merged` schema is populated even when there are
+/// conflicts (conflicting fields fall back to `ours`), so silently dropping this
+/// value would discard the conflict list and treat a lossy merge as clean.
+/// Check [`is_clean`](Self::is_clean) / [`conflicts`](Self::conflicts) first.
 #[derive(Debug, Clone)]
+#[must_use = "a MergeResult may carry conflicts; inspect is_clean()/conflicts before using `merged`"]
 pub struct MergeResult {
     /// Best-effort merged schema. Auto-resolved changes are applied; conflicting
     /// fields take the `ours` definition so the schema remains constructible.
@@ -72,6 +78,7 @@ pub struct MergeResult {
 
 impl MergeResult {
     /// `true` when the merge produced no conflicts.
+    #[must_use]
     pub fn is_clean(&self) -> bool {
         self.conflicts.is_empty()
     }

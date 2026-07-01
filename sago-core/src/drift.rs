@@ -58,6 +58,33 @@ pub struct ColumnDrift {
     pub psi_statistic: Option<f64>,
 }
 
+impl ColumnDrift {
+    /// Whether this column's distribution has drifted beyond `threshold`,
+    /// measured by the Population Stability Index (PSI) — a scale-free metric
+    /// (unlike the raw `mean_drift`), so a single `checks.drift_threshold`
+    /// applies uniformly across columns. Columns without a PSI (non-numeric, or
+    /// stats-only plans where PSI isn't computed) are treated as not-breaching.
+    ///
+    /// Common PSI rules of thumb: < 0.1 no significant shift, 0.1–0.25 moderate,
+    /// > 0.25 major. A caller-supplied `threshold` overrides that judgement.
+    #[must_use]
+    pub fn breaches_threshold(&self, threshold: f64) -> bool {
+        self.psi_statistic.is_some_and(|psi| psi > threshold)
+    }
+}
+
+/// Field names present in *both* schemas. Shared by the batch-based detectors so
+/// they compute "columns in common" the same way.
+fn common_field_names(a: &Schema, b: &Schema) -> Vec<String> {
+    let b_names: HashSet<&str> = b.fields().iter().map(|f| f.name().as_str()).collect();
+    a.fields()
+        .iter()
+        .map(|f| f.name())
+        .filter(|n| b_names.contains(n.as_str()))
+        .cloned()
+        .collect()
+}
+
 pub fn detect_schema_drift(source: &Schema, target: &Schema) -> SchemaDrift {
     let source_fields: HashSet<_> = source.fields().iter().map(|f| f.name().clone()).collect();
     let target_fields: HashSet<_> = target.fields().iter().map(|f| f.name().clone()).collect();
@@ -102,23 +129,12 @@ pub fn detect_semantic_drift(
     let source_schema = source_batches[0].schema();
     let target_schema = target_batches[0].schema();
 
-    let source_fields: HashSet<_> = source_schema
-        .fields()
-        .iter()
-        .map(|f| f.name().clone())
-        .collect();
-    let target_fields: HashSet<_> = target_schema
-        .fields()
-        .iter()
-        .map(|f| f.name().clone())
-        .collect();
+    for field_name in common_field_names(&source_schema, &target_schema) {
+        let source_col = source_batches[0].column_by_name(&field_name).unwrap();
+        let target_col = target_batches[0].column_by_name(&field_name).unwrap();
 
-    for field_name in source_fields.intersection(&target_fields) {
-        let source_col = source_batches[0].column_by_name(field_name).unwrap();
-        let target_col = target_batches[0].column_by_name(field_name).unwrap();
-
-        let source_semantic = infer_semantic_type(field_name, source_col.as_ref());
-        let target_semantic = infer_semantic_type(field_name, target_col.as_ref());
+        let source_semantic = infer_semantic_type(&field_name, source_col.as_ref());
+        let target_semantic = infer_semantic_type(&field_name, target_col.as_ref());
 
         if source_semantic != target_semantic {
             semantic_drifts.push(SemanticDrift {
@@ -130,6 +146,41 @@ pub fn detect_semantic_drift(
     }
 
     semantic_drifts
+}
+
+/// The Arrow numeric types Sago treats as drift-comparable, and the single place
+/// that authoritative list lives. Used by both [`calculate_column_stats`] and
+/// [`extract_numeric_values`] so they can never disagree about what "numeric" is.
+fn is_supported_numeric(dt: &DataType) -> bool {
+    matches!(
+        dt,
+        DataType::Int16 | DataType::Int32 | DataType::Int64 | DataType::Float32 | DataType::Float64
+    )
+}
+
+/// Call `f` with every non-null value of `column` as an `f64`, downcasting the
+/// array exactly once. Does nothing for non-numeric columns. Centralises the
+/// per-type downcast so callers don't re-match `data_type()` per row.
+fn for_each_numeric(column: &dyn Array, mut f: impl FnMut(f64)) {
+    macro_rules! iter_array {
+        ($ty:ty, $cast:expr) => {{
+            let arr = column.as_any().downcast_ref::<$ty>().unwrap();
+            for i in 0..arr.len() {
+                if !arr.is_null(i) {
+                    let v = arr.value(i);
+                    f($cast(v));
+                }
+            }
+        }};
+    }
+    match column.data_type() {
+        DataType::Int16 => iter_array!(Int16Array, |v| v as f64),
+        DataType::Int32 => iter_array!(Int32Array, |v| v as f64),
+        DataType::Int64 => iter_array!(Int64Array, |v| v as f64),
+        DataType::Float32 => iter_array!(Float32Array, |v| v as f64),
+        DataType::Float64 => iter_array!(Float64Array, |v: f64| v),
+        _ => {}
+    }
 }
 
 pub fn calculate_column_stats(batches: &[RecordBatch], column_name: &str) -> Option<ColumnStats> {
@@ -150,76 +201,28 @@ pub fn calculate_column_stats(batches: &[RecordBatch], column_name: &str) -> Opt
         null_count += column.null_count();
         row_count += batch.num_rows();
 
-        match column.data_type() {
-            DataType::Int16
-            | DataType::Int32
-            | DataType::Int64
-            | DataType::Float32
-            | DataType::Float64 => {
-                has_numeric = true;
-                for i in 0..column.len() {
-                    if !column.is_null(i) {
-                        let val = match column.data_type() {
-                            DataType::Int16 => column
-                                .as_any()
-                                .downcast_ref::<Int16Array>()
-                                .unwrap()
-                                .value(i) as f64,
-                            DataType::Int32 => column
-                                .as_any()
-                                .downcast_ref::<Int32Array>()
-                                .unwrap()
-                                .value(i) as f64,
-                            DataType::Int64 => column
-                                .as_any()
-                                .downcast_ref::<Int64Array>()
-                                .unwrap()
-                                .value(i) as f64,
-                            DataType::Float32 => column
-                                .as_any()
-                                .downcast_ref::<Float32Array>()
-                                .unwrap()
-                                .value(i) as f64,
-                            DataType::Float64 => column
-                                .as_any()
-                                .downcast_ref::<Float64Array>()
-                                .unwrap()
-                                .value(i),
-                            _ => unreachable!(),
-                        };
-                        sum += val;
-                        numeric_count += 1;
-                        if val < min {
-                            min = val;
-                        }
-                        if val > max {
-                            max = val;
-                        }
-                    }
+        if is_supported_numeric(column.data_type()) {
+            has_numeric = true;
+            for_each_numeric(column.as_ref(), |val| {
+                sum += val;
+                numeric_count += 1;
+                if val < min {
+                    min = val;
                 }
-            }
-            _ => {}
+                if val > max {
+                    max = val;
+                }
+            });
         }
     }
 
+    let has_values = has_numeric && numeric_count > 0;
     Some(ColumnStats {
         null_count,
         row_count,
-        mean: if has_numeric && numeric_count > 0 {
-            Some(sum / numeric_count as f64)
-        } else {
-            None
-        },
-        min: if has_numeric && numeric_count > 0 {
-            Some(min)
-        } else {
-            None
-        },
-        max: if has_numeric && numeric_count > 0 {
-            Some(max)
-        } else {
-            None
-        },
+        mean: has_values.then(|| sum / numeric_count as f64),
+        min: has_values.then_some(min),
+        max: has_values.then_some(max),
     })
 }
 
@@ -274,18 +277,8 @@ pub fn detect_data_drift(
     let source_schema = source_batches[0].schema();
     let target_schema = target_batches[0].schema();
 
-    let source_fields: HashSet<_> = source_schema
-        .fields()
-        .iter()
-        .map(|f| f.name().clone())
-        .collect();
-    let target_fields: HashSet<_> = target_schema
-        .fields()
-        .iter()
-        .map(|f| f.name().clone())
-        .collect();
-
-    for field_name in source_fields.intersection(&target_fields) {
+    for field_name in common_field_names(&source_schema, &target_schema) {
+        let field_name = field_name.as_str();
         let (source_stats, target_stats) = match (
             calculate_column_stats(source_batches, field_name),
             calculate_column_stats(target_batches, field_name),
@@ -303,17 +296,22 @@ pub fn detect_data_drift(
 
         let null_count_drift = target_stats.null_count as i64 - source_stats.null_count as i64;
 
-        let (ks_statistic, ks_p_value) =
-            calculate_ks_test(source_batches, target_batches, field_name);
+        // Extract each side's numeric values exactly once, then reuse them for
+        // both the KS statistic (needs them sorted) and PSI (bins the raw
+        // values) instead of re-scanning and re-allocating per metric.
+        let src_vals = extract_numeric_values(source_batches, field_name);
+        let tgt_vals = extract_numeric_values(target_batches, field_name);
 
-        let psi_statistic = {
-            let src = extract_numeric_values(source_batches, field_name);
-            let tgt = extract_numeric_values(target_batches, field_name);
-            calculate_psi(&src, &tgt)
-        };
+        let psi_statistic = calculate_psi(&src_vals, &tgt_vals);
+
+        let mut src_sorted = src_vals;
+        let mut tgt_sorted = tgt_vals;
+        src_sorted.sort_by(|a, b| a.total_cmp(b));
+        tgt_sorted.sort_by(|a, b| a.total_cmp(b));
+        let (ks_statistic, ks_p_value) = ks_from_sorted(&src_sorted, &tgt_sorted);
 
         column_drifts.insert(
-            field_name.clone(),
+            field_name.to_string(),
             ColumnDrift {
                 source_stats,
                 target_stats,
@@ -333,118 +331,90 @@ pub(crate) fn extract_numeric_values(batches: &[RecordBatch], column_name: &str)
     let mut values = Vec::new();
     for batch in batches {
         if let Some(column) = batch.column_by_name(column_name) {
-            match column.data_type() {
-                DataType::Int16 => {
-                    let arr = column.as_any().downcast_ref::<Int16Array>().unwrap();
-                    for i in 0..arr.len() {
-                        if !arr.is_null(i) {
-                            values.push(arr.value(i) as f64);
-                        }
-                    }
-                }
-                DataType::Int32 => {
-                    let arr = column.as_any().downcast_ref::<Int32Array>().unwrap();
-                    for i in 0..arr.len() {
-                        if !arr.is_null(i) {
-                            values.push(arr.value(i) as f64);
-                        }
-                    }
-                }
-                DataType::Int64 => {
-                    let arr = column.as_any().downcast_ref::<Int64Array>().unwrap();
-                    for i in 0..arr.len() {
-                        if !arr.is_null(i) {
-                            values.push(arr.value(i) as f64);
-                        }
-                    }
-                }
-                DataType::Float32 => {
-                    let arr = column.as_any().downcast_ref::<Float32Array>().unwrap();
-                    for i in 0..arr.len() {
-                        if !arr.is_null(i) {
-                            values.push(arr.value(i) as f64);
-                        }
-                    }
-                }
-                DataType::Float64 => {
-                    let arr = column.as_any().downcast_ref::<Float64Array>().unwrap();
-                    for i in 0..arr.len() {
-                        if !arr.is_null(i) {
-                            values.push(arr.value(i));
-                        }
-                    }
-                }
-                _ => {}
-            }
+            for_each_numeric(column.as_ref(), |v| values.push(v));
         }
     }
     values
 }
 
-fn calculate_ks_test(
-    source_batches: &[RecordBatch],
-    target_batches: &[RecordBatch],
-    column_name: &str,
-) -> (Option<f64>, Option<f64>) {
-    let mut source_vals = extract_numeric_values(source_batches, column_name);
-    let mut target_vals = extract_numeric_values(target_batches, column_name);
-
+/// Two-sample KS statistic and p-value from already-sorted samples (ascending by
+/// `total_cmp`). Returns `(None, None)` if either side is empty. Kept separate
+/// from extraction so callers can sort once and reuse the buffers.
+fn ks_from_sorted(source_vals: &[f64], target_vals: &[f64]) -> (Option<f64>, Option<f64>) {
     if source_vals.is_empty() || target_vals.is_empty() {
         return (None, None);
     }
 
-    // Sort the arrays to compute the Empirical CDF
-    source_vals.sort_by(|a, b| a.total_cmp(b));
-    target_vals.sort_by(|a, b| a.total_cmp(b));
-
     let n1 = source_vals.len() as f64;
     let n2 = target_vals.len() as f64;
 
-    let mut max_dist = 0.0;
+    let mut max_dist: f64 = 0.0;
     let mut i = 0;
     let mut j = 0;
 
+    // Merge-walk the two sorted samples. The empirical CDFs are step functions
+    // that only jump at observed values, so the KS statistic — sup|F1 - F2| — is
+    // attained at one of those jump points. On each step we take the smaller of
+    // the two current values and advance *past every copy* of it in both samples
+    // before sampling the gap. Advancing one element at a time instead (the naive
+    // approach) samples |F1 - F2| in the middle of a tie run, which can only
+    // overestimate the true statistic and fires false-positive drift on tied /
+    // low-cardinality (e.g. integer, categorical) columns.
     while i < source_vals.len() && j < target_vals.len() {
-        let val1 = source_vals[i];
-        let val2 = target_vals[j];
-
-        if val1 <= val2 {
+        // `total_cmp` gives a total order over f64 (NaN sorts last, consistent
+        // with the sort above) and defines equality even for NaN, so the inner
+        // loops always advance and the walk terminates.
+        let v = if source_vals[i].total_cmp(&target_vals[j]) == std::cmp::Ordering::Greater {
+            target_vals[j]
+        } else {
+            source_vals[i]
+        };
+        while i < source_vals.len() && source_vals[i].total_cmp(&v) == std::cmp::Ordering::Equal {
             i += 1;
         }
-        if val2 <= val1 {
+        while j < target_vals.len() && target_vals[j].total_cmp(&v) == std::cmp::Ordering::Equal {
             j += 1;
         }
 
-        let cdf1 = i as f64 / n1;
-        let cdf2 = j as f64 / n2;
-        let dist = (cdf1 - cdf2).abs();
-
+        let dist = (i as f64 / n1 - j as f64 / n2).abs();
         if dist > max_dist {
             max_dist = dist;
         }
     }
 
-    // Very basic KS p-value approximation for 2-sample test
+    // Asymptotic 2-sample KS p-value (Kolmogorov distribution).
     let en = (n1 * n2) / (n1 + n2);
-    let lambda = (en.sqrt() + 0.12 + 0.11 / en.sqrt()) * max_dist;
+    let sqrt_en = en.sqrt();
+    let lambda = (sqrt_en + 0.12 + 0.11 / sqrt_en) * max_dist;
 
-    // Using asymptotic formula for Kolmogorov distribution
-    let mut p_value = 0.0;
-    if lambda > 0.0 {
+    let p_value = if lambda <= 0.0 {
+        // max_dist == 0 ⇒ the empirical distributions are identical ⇒ no evidence
+        // against the null, i.e. p = 1.0. (The series below degenerates at
+        // lambda = 0 and must not be used — it would leave p at 0.0, which reads
+        // as "maximally significant drift", the exact opposite of the truth.)
+        1.0
+    } else {
         let mut sum = 0.0;
         for k in 1..=100 {
             let sign = if k % 2 == 0 { -1.0 } else { 1.0 };
             sum += sign * (-2.0 * (k as f64 * lambda).powi(2)).exp();
         }
-        p_value = 2.0 * sum;
-        p_value = p_value.clamp(0.0, 1.0);
-    }
+        (2.0 * sum).clamp(0.0, 1.0)
+    };
 
     (Some(max_dist), Some(p_value))
 }
 
 const PSI_NUM_BINS: usize = 10;
 const PSI_EPSILON: f64 = 0.0001;
+
+/// Population Stability Index between two numeric samples, or `None` if either
+/// side is empty. Exposed so callers that only persist samples (e.g. the `plan`
+/// baseline vs. live comparison) can compute the same normalized drift metric
+/// that [`detect_data_drift`] computes from full record batches.
+pub fn psi_from_samples(source: &[f64], target: &[f64]) -> Option<f64> {
+    calculate_psi(source, target)
+}
 
 fn calculate_psi(source: &[f64], target: &[f64]) -> Option<f64> {
     if source.is_empty() || target.is_empty() {
@@ -819,6 +789,48 @@ mod tests {
         let col = drift.column_drifts.get("v").unwrap();
         assert!(col.ks_statistic.is_some());
         assert!(col.ks_p_value.is_some());
+    }
+
+    #[test]
+    fn test_ks_tied_values_not_overestimated() {
+        // Regression: the merge-walk must advance past every copy of a tied value
+        // before sampling the ECDF gap. source = four 1s, target = one 1 → the two
+        // empirical distributions are identical (both a point mass at 1), so the
+        // KS statistic is exactly 0, NOT 0.75.
+        let b1 = int32_batch("v", vec![Some(1), Some(1), Some(1), Some(1)]);
+        let b2 = int32_batch("v", vec![Some(1)]);
+        let drift = detect_data_drift(&[b1], &[b2]);
+        let col = drift.column_drifts.get("v").unwrap();
+        assert_eq!(col.ks_statistic, Some(0.0));
+    }
+
+    #[test]
+    fn test_ks_partial_tie_matches_textbook() {
+        // source = [0, 1], target = [1, 1, 1, 2, 3].
+        // F_src jumps to 0.5 at 0 and 1.0 at 1. F_tgt is 0 below 1, 0.6 at 1,
+        // 0.8 at 2, 1.0 at 3. The sup gap is at value 0: |0.5 - 0| = 0.5.
+        let b1 = int32_batch("v", vec![Some(0), Some(1)]);
+        let b2 = int32_batch("v", vec![Some(1), Some(1), Some(1), Some(2), Some(3)]);
+        let drift = detect_data_drift(&[b1], &[b2]);
+        let col = drift.column_drifts.get("v").unwrap();
+        assert!(
+            (col.ks_statistic.unwrap() - 0.5).abs() < 1e-12,
+            "expected 0.5, got {:?}",
+            col.ks_statistic
+        );
+    }
+
+    #[test]
+    fn test_ks_p_value_is_one_for_identical_distributions() {
+        // Regression: identical data ⇒ max_dist = 0 ⇒ p-value must be 1.0 (no
+        // evidence of drift), not the previous buggy 0.0 (which read as certain
+        // drift).
+        let b1 = int32_batch("v", vec![Some(1), Some(2), Some(3), Some(4)]);
+        let b2 = int32_batch("v", vec![Some(1), Some(2), Some(3), Some(4)]);
+        let drift = detect_data_drift(&[b1], &[b2]);
+        let col = drift.column_drifts.get("v").unwrap();
+        assert_eq!(col.ks_statistic, Some(0.0));
+        assert_eq!(col.ks_p_value, Some(1.0));
     }
 
     #[test]

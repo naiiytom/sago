@@ -27,6 +27,19 @@ impl PostgresSchemaProvider {
             .join(".")
     }
 
+    /// Split a table identifier into `(schema, table)`, defaulting the schema to
+    /// `public`. Accepts only `table` or `schema.table`; anything else is an
+    /// error rather than a silent truncation.
+    pub(crate) fn split_identifier(identifier: &str) -> Result<(&str, &str)> {
+        match identifier.split('.').collect::<Vec<_>>()[..] {
+            [table] => Ok(("public", table)),
+            [schema, table] => Ok((schema, table)),
+            _ => Err(SagoError::Config(format!(
+                "invalid Postgres identifier '{identifier}': expected 'table' or 'schema.table'"
+            ))),
+        }
+    }
+
     pub(crate) fn map_postgres_type(data_type: &str) -> DataType {
         match data_type {
             "boolean" => DataType::Boolean,
@@ -55,12 +68,12 @@ impl PostgresSchemaProvider {
 #[async_trait]
 impl SchemaProvider for PostgresSchemaProvider {
     async fn get_schema(&self, identifier: &str) -> Result<Schema> {
-        let (schema_name, table_name) = if identifier.contains('.') {
-            let parts: Vec<&str> = identifier.split('.').collect();
-            (parts[0], parts[1])
-        } else {
-            ("public", identifier)
-        };
+        // Accept exactly `table` (defaults to the `public` schema) or
+        // `schema.table`. Anything with more dotted segments is rejected rather
+        // than silently truncated — previously `a.b.c` kept only `a.b` and
+        // dropped `c`, then get_data quoted the full string, so schema lookup and
+        // data fetch disagreed.
+        let (schema_name, table_name) = Self::split_identifier(identifier)?;
 
         let rows = sqlx::query(
             "SELECT column_name, data_type, is_nullable 
@@ -340,6 +353,34 @@ mod tests {
         ));
     }
 
+    // ── split_identifier ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_split_identifier_bare_table_defaults_public() {
+        assert_eq!(
+            PostgresSchemaProvider::split_identifier("users").unwrap(),
+            ("public", "users")
+        );
+    }
+
+    #[test]
+    fn test_split_identifier_schema_dot_table() {
+        assert_eq!(
+            PostgresSchemaProvider::split_identifier("analytics.events").unwrap(),
+            ("analytics", "events")
+        );
+    }
+
+    #[test]
+    fn test_split_identifier_extra_segments_rejected() {
+        // Regression: `db.schema.table` must error, not silently drop `table`.
+        let err = PostgresSchemaProvider::split_identifier("db.analytics.events").unwrap_err();
+        match err {
+            SagoError::Config(msg) => assert!(msg.contains("expected 'table' or 'schema.table'")),
+            other => panic!("expected Config error, got {other:?}"),
+        }
+    }
+
     // ── quote_identifier ─────────────────────────────────────────────────────
 
     #[test]
@@ -383,6 +424,38 @@ mod tests {
     }
 
     // ── map_postgres_type ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_map_postgres_type_round_trips_through_state_codec() {
+        // Guard: every Arrow type that map_postgres_type can produce must
+        // serialize+parse cleanly through schema_codec, so a snapshot captured
+        // from Postgres always reloads. Catches divergence in CI rather than at
+        // production load time.
+        use crate::schema_codec::{parse_data_type, serialize_data_type};
+        let pg_types = [
+            "boolean",
+            "smallint",
+            "integer",
+            "bigint",
+            "real",
+            "double precision",
+            "numeric",
+            "text",
+            "bytea",
+            "date",
+            "timestamp",
+            "timestamp with time zone",
+            "json",
+            "some_unknown_type",
+        ];
+        for pg in pg_types {
+            let dt = PostgresSchemaProvider::map_postgres_type(pg);
+            let s = serialize_data_type(&dt);
+            let back = parse_data_type(&s)
+                .unwrap_or_else(|e| panic!("pg type {pg} -> {dt:?} -> {s} failed to parse: {e}"));
+            assert_eq!(back, dt, "round-trip mismatch for pg type {pg}");
+        }
+    }
 
     #[test]
     fn test_map_postgres_type_unknown_falls_back_to_utf8() {
