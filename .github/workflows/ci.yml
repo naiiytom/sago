@@ -39,7 +39,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        rust: ["1.85", stable]
+        # Pinned MSRV (see workspace.package.rust-version) + stable.
+        rust: ["1.89", stable]
     steps:
       - uses: actions/checkout@v4
       - name: Install ${{ matrix.rust }} toolchain

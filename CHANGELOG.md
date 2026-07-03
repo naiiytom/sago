@@ -23,6 +23,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   floor so near-miss sibling columns (`address_line1`/`address_line2`) are not
   mistaken for renames.
 
+### Changed
+
+- **MSRV raised to Rust 1.89** (from 1.85). The bump is driven entirely by the
+  dependency tree — `ratatui` 0.30 and `tonic` 0.14 require 1.88, and transitive
+  deps (e.g. `crc-fast`) require 1.89 — not by the crate's own source. CI pins
+  the MSRV job to 1.89.
+
 ### Removed
 
 - Dead `SchemaDrift.semantic_drifts` field (semantic drift lives on `DiffReport`);

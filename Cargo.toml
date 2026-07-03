@@ -11,7 +11,10 @@ resolver = "2"
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+# MSRV is driven by the dependency tree, not the crate's own code: ratatui 0.30
+# and tonic 0.14 require 1.88, and transitive deps (e.g. crc-fast) require 1.89.
+# Verified against 1.89 in CI.
+rust-version = "1.89"
 authors = ["Yuttapichai"]
 license = "MIT"
 repository = "https://github.com/naiiytom/sago"
