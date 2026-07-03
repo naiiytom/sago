@@ -57,10 +57,15 @@ message FieldRename {
 }
 
 message SchemaDrift {
+  // Field 4 previously held per-column semantic_drifts, which duplicated
+  // DiffReport.semantic_drifts (where semantic drift actually lives). Removed;
+  // the number is reserved so it is never reused with a different meaning.
+  reserved 4;
+  reserved "semantic_drifts";
+
   repeated string added_fields = 1;
   repeated string removed_fields = 2;
   repeated TypeChange changed_types = 3;
-  repeated SemanticDrift semantic_drifts = 4;
   repeated FieldRename renamed_fields = 5;
 }
 

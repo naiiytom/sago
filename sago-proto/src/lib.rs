@@ -65,7 +65,6 @@ mod tests {
                 added_fields: vec!["email".into()],
                 removed_fields: vec![],
                 changed_types: vec![],
-                semantic_drifts: vec![],
                 renamed_fields: vec![v1::FieldRename {
                     from: "phone".into(),
                     to: "phone_number".into(),

@@ -16,11 +16,31 @@ pub struct DiffReport {
     pub data_drift: DataDrift,
 }
 
+/// Diff two datasets using the default rename-detection tunables.
 pub async fn diff_datasets(
     source_provider: Arc<dyn DataProvider>,
     source_identifier: &str,
     target_provider: Arc<dyn DataProvider>,
     target_identifier: &str,
+) -> Result<DiffReport> {
+    diff_datasets_with_options(
+        source_provider,
+        source_identifier,
+        target_provider,
+        target_identifier,
+        &RenameOptions::default(),
+    )
+    .await
+}
+
+/// Diff two datasets, controlling rename detection via `rename_opts` (e.g. a
+/// caller-configured confidence threshold from `checks.rename_confidence_threshold`).
+pub async fn diff_datasets_with_options(
+    source_provider: Arc<dyn DataProvider>,
+    source_identifier: &str,
+    target_provider: Arc<dyn DataProvider>,
+    target_identifier: &str,
+    rename_opts: &RenameOptions,
 ) -> Result<DiffReport> {
     let source_schema = source_provider.get_schema(source_identifier).await?;
     let target_schema = target_provider.get_schema(target_identifier).await?;
@@ -37,7 +57,7 @@ pub async fn diff_datasets(
         &mut schema_drift,
         &source_profiles,
         &target_profiles,
-        &RenameOptions::default(),
+        rename_opts,
     );
 
     let semantic_drifts = detect_semantic_drift(&source_data, &target_data);

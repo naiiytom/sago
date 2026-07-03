@@ -80,10 +80,26 @@ pub struct RenameOptions {
     pub min_name_only_similarity: f64,
 }
 
+/// Default minimum blended confidence for accepting a rename. Shared with the
+/// config layer so the CLI default and the library default never diverge.
+pub const DEFAULT_MIN_CONFIDENCE: f64 = 0.6;
+
+impl RenameOptions {
+    /// [`RenameOptions::default`] but with a caller-supplied confidence floor
+    /// (e.g. from `checks.rename_confidence_threshold` or `--rename-threshold`).
+    #[must_use]
+    pub fn with_min_confidence(min_confidence: f64) -> Self {
+        RenameOptions {
+            min_confidence,
+            ..RenameOptions::default()
+        }
+    }
+}
+
 impl Default for RenameOptions {
     fn default() -> Self {
         RenameOptions {
-            min_confidence: 0.6,
+            min_confidence: DEFAULT_MIN_CONFIDENCE,
             require_type_match: true,
             min_name_only_similarity: 0.92,
         }
@@ -466,7 +482,6 @@ mod tests {
             added_fields: added.iter().map(|s| s.to_string()).collect(),
             removed_fields: removed.iter().map(|s| s.to_string()).collect(),
             changed_types: Vec::new(),
-            semantic_drifts: Vec::new(),
             renamed_fields: Vec::new(),
         }
     }

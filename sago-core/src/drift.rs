@@ -14,7 +14,6 @@ pub struct SchemaDrift {
     pub added_fields: Vec<String>,
     pub removed_fields: Vec<String>,
     pub changed_types: Vec<TypeChange>,
-    pub semantic_drifts: Vec<SemanticDrift>,
     /// Columns recognised as renames of removed columns rather than genuine
     /// drops/additions. Populated by [`crate::rename::refine_renames`]; the
     /// involved names are removed from `added_fields`/`removed_fields`.
@@ -115,7 +114,6 @@ pub fn detect_schema_drift(source: &Schema, target: &Schema) -> SchemaDrift {
         added_fields,
         removed_fields,
         changed_types,
-        semantic_drifts: Vec::new(),
         renamed_fields: Vec::new(),
     }
 }

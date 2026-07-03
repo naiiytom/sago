@@ -2,9 +2,11 @@ use anyhow::{Context, Result, anyhow};
 use clap::Args;
 use sago_core::config::Config;
 use sago_core::connection::build_provider;
-use sago_core::diff::diff_datasets;
+use sago_core::diff::diff_datasets_with_options;
+use sago_core::rename::RenameOptions;
 use std::path::{Path, PathBuf};
 
+use crate::commands::plan::resolve_rename_threshold;
 use crate::report::{default_artifact_path, print_terminal, write_artifact};
 
 #[derive(Args, Debug)]
@@ -16,6 +18,11 @@ pub struct DiffArgs {
     /// Where to write the JSON artifact
     #[arg(long)]
     pub out: Option<PathBuf>,
+
+    /// Override the rename-detection confidence threshold in [0, 1]
+    /// (default: checks.rename_confidence_threshold from Sago.toml).
+    #[arg(long)]
+    pub rename_threshold: Option<f64>,
 }
 
 pub async fn run(args: &DiffArgs) -> Result<()> {
@@ -32,7 +39,13 @@ pub async fn run(args: &DiffArgs) -> Result<()> {
         .await
         .with_context(|| format!("failed to build provider for right side '{}'", args.right))?;
 
-    let report = diff_datasets(left, &left_id, right, &right_id).await?;
+    let rename_confidence = resolve_rename_threshold(
+        args.rename_threshold,
+        cfg.checks.rename_confidence_threshold,
+    )?;
+    let rename_opts = RenameOptions::with_min_confidence(rename_confidence);
+
+    let report = diff_datasets_with_options(left, &left_id, right, &right_id, &rename_opts).await?;
 
     print_terminal(std::slice::from_ref(&report));
 
