@@ -418,8 +418,8 @@ fn ks_from_sorted(source_vals: &[f64], target_vals: &[f64]) -> (Option<f64>, Opt
         1.0
     } else {
         let mut sum = 0.0;
-        for k in 1..=100 {
-            let sign = if k % 2 == 0 { -1.0 } else { 1.0 };
+        for k in 1u32..=100 {
+            let sign = if k.is_multiple_of(2) { -1.0 } else { 1.0 };
             sum += sign * (-2.0 * (k as f64 * lambda).powi(2)).exp();
         }
         (2.0 * sum).clamp(0.0, 1.0)

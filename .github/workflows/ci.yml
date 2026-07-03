@@ -22,9 +22,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install stable toolchain
-        uses: dtolnay/rust-toolchain@stable
+      # Pin the lint toolchain (not floating `stable`) so a new Rust release
+      # adding lints can't turn previously-clean code into a red CI on unrelated
+      # PRs. Bump this deliberately, in step with workspace.package.rust-version.
+      - name: Install pinned toolchain (MSRV)
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.89"
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - name: cargo fmt --check
