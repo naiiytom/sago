@@ -52,6 +52,7 @@ version = "0.1.0"
 # PSI exceeds it fails the plan with a non-zero exit code, so CI can gate on it.
 [checks]
 drift_threshold = 0.05
+# rename_confidence_threshold = 0.6   # min confidence to report a rename (0..1)
 "#
     )
 }

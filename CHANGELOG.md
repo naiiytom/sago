@@ -7,7 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Drift gating now works out of the box**: `sago apply` persists per-column
+  samples by default (previously only when a target explicitly opted in), so
+  `sago plan`'s PSI drift gate is no longer a silent no-op. Opt a target out with
+  `[targets.<name>.sample] enabled = false`.
+- **Statistical robustness**: `NaN` values are excluded from PSI/stats instead of
+  collapsing every value into the first bin; unsigned and 8-bit integer columns
+  now participate in KS/PSI drift; Postgres `date`/`timestamp`/`numeric`/`bytea`
+  columns are now extracted with real values instead of coming back all-null.
+- **Config validation**: `checks.drift_threshold` (and the new
+  `rename_confidence_threshold`) are validated to `[0, 1]` at parse time.
+- Tightened email/URL semantic-type regexes and raised the name-only rename
+  floor so near-miss sibling columns (`address_line1`/`address_line2`) are not
+  mistaken for renames.
+
+### Removed
+
+- Dead `SchemaDrift.semantic_drifts` field (semantic drift lives on `DiffReport`);
+  the corresponding `sago.v1.SchemaDrift` proto field 4 is now `reserved`.
+
 ### Added
+
+- **PSI / KS in reports**: `sago plan` and `sago diff` now print the `psi=`,
+  `ks=`, and `p=` values per drifted column — the metrics that gate the exit
+  code — with deterministic (sorted) column ordering.
+- **Configurable rename detection**: `checks.rename_confidence_threshold` in
+  `Sago.toml` and a `--rename-threshold` flag on `plan`/`diff`.
+- `sago plan` now reports newly-added live columns that carry a concrete semantic
+  type (e.g. a fresh `email`/`ssn` column) as semantic drift.
 
 - **Data-mesh target metadata**: `TargetConfig` gained optional `domain` and
   `owner` fields, the first concrete step toward decentralized / federated data
@@ -20,12 +49,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `wasm32-unknown-unknown`. New `sago-wasm` crate exposes `infer_semantic`,
   `merge_schemas`, and `merkle_root` to JavaScript via `wasm-bindgen` for
   browser / edge execution.
-- **sago-proto gRPC interface**: `.proto` definitions for the `sago.v1` package
-  (schema, drift, semantic types, `DiffReport`, and a `SagoService` with
-  `GetSchema`/`Diff` RPCs). Compiled at build time with the **pure-Rust
-  `protox`** compiler driving `tonic-prost-build`, so the crate builds with no
-  system `protoc` toolchain — unblocking the item previously deferred for that
-  reason. Generates both client and server stubs.
+- **sago-proto gRPC interface (definitions + codegen)**: `.proto` definitions
+  for the `sago.v1` package (schema, drift, semantic types, `DiffReport`, and a
+  `SagoService` with `GetSchema`/`Diff` RPCs). Compiled at build time with the
+  **pure-Rust `protox`** compiler driving `tonic-prost-build`, so the crate
+  builds with no system `protoc` toolchain — unblocking the item previously
+  deferred for that reason. Generates both client and server stubs; a concrete
+  `SagoService` **server implementation** is not yet provided (tracked in
+  `docs/DECENTRALIZED.md`).
 - **Three-way schema merge** (`sago-core::merge`): `three_way_merge(base, ours,
   theirs)` reconciles two independently evolved schemas against their common
   ancestor. Non-conflicting changes (one-sided edits, identical edits, shared

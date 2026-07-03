@@ -84,6 +84,16 @@ fn default_sample_n() -> usize {
 #[derive(Debug, Deserialize)]
 pub struct ChecksConfig {
     pub drift_threshold: f64,
+    /// Minimum blended confidence for a removed/added column pair to be reported
+    /// as a rename rather than a drop + add. Defaults to
+    /// [`crate::rename::DEFAULT_MIN_CONFIDENCE`]. Raise it for stricter matching
+    /// (fewer false-positive renames), lower it to catch more renames.
+    #[serde(default = "default_rename_confidence_threshold")]
+    pub rename_confidence_threshold: f64,
+}
+
+fn default_rename_confidence_threshold() -> f64 {
+    crate::rename::DEFAULT_MIN_CONFIDENCE
 }
 
 impl Config {
@@ -118,6 +128,12 @@ impl Config {
         if !t.is_finite() || !(0.0..=1.0).contains(&t) {
             return Err(crate::SagoError::Config(format!(
                 "checks.drift_threshold must be in [0.0, 1.0], got {t}"
+            )));
+        }
+        let rt = self.checks.rename_confidence_threshold;
+        if !rt.is_finite() || !(0.0..=1.0).contains(&rt) {
+            return Err(crate::SagoError::Config(format!(
+                "checks.rename_confidence_threshold must be in [0.0, 1.0], got {rt}"
             )));
         }
         Ok(())
@@ -460,6 +476,50 @@ drift_threshold = {t}
     fn test_drift_threshold_above_one_rejected() {
         let err = config_with_threshold("100.0").unwrap_err();
         assert!(matches!(err, crate::SagoError::Config(_)));
+    }
+
+    #[test]
+    fn test_rename_confidence_threshold_defaults() {
+        // Omitted → falls back to the shared library default.
+        let cfg = config_with_threshold("0.05").unwrap();
+        assert_eq!(
+            cfg.checks.rename_confidence_threshold,
+            crate::rename::DEFAULT_MIN_CONFIDENCE
+        );
+    }
+
+    #[test]
+    fn test_rename_confidence_threshold_parsed_and_validated() {
+        let toml = r#"
+[project]
+name = "p"
+version = "1"
+
+[connections.c]
+type = "s3"
+bucket = "b"
+region = "r"
+
+[targets.t]
+connection = "c"
+identifier = "x"
+
+[checks]
+drift_threshold = 0.05
+rename_confidence_threshold = 0.8
+"#;
+        let cfg = Config::from_toml(toml).unwrap();
+        assert_eq!(cfg.checks.rename_confidence_threshold, 0.8);
+
+        // Out-of-range value is rejected at parse time.
+        let bad = toml.replace("0.8", "1.5");
+        let err = Config::from_toml(&bad).unwrap_err();
+        match err {
+            crate::SagoError::Config(msg) => {
+                assert!(msg.contains("rename_confidence_threshold"))
+            }
+            other => panic!("expected Config error, got {other:?}"),
+        }
     }
 
     #[test]

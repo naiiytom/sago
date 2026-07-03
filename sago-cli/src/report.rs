@@ -44,14 +44,34 @@ pub fn print_terminal_to<W: std::io::Write>(
             }
         }
         if !r.data_drift.column_drifts.is_empty() {
-            for (col, d) in &r.data_drift.column_drifts {
-                if d.mean_drift.unwrap_or(0.0).abs() > f64::EPSILON || d.null_count_drift != 0 {
-                    writeln!(
-                        w,
-                        "  data drift:     {} mean_drift={:?} null_count_drift={}",
-                        col, d.mean_drift, d.null_count_drift,
-                    )?;
+            // Deterministic column order (HashMap iteration is unordered).
+            let mut cols: Vec<_> = r.data_drift.column_drifts.iter().collect();
+            cols.sort_by(|a, b| a.0.cmp(b.0));
+            for (col, d) in cols {
+                // Surface a column when *any* drift signal is present — including
+                // PSI/KS, which gate `sago plan`'s exit code and were previously
+                // invisible even though a plan could fail on them.
+                let has_stat_drift =
+                    d.mean_drift.unwrap_or(0.0).abs() > f64::EPSILON || d.null_count_drift != 0;
+                let has_dist_drift = d.psi_statistic.is_some() || d.ks_statistic.is_some();
+                if !has_stat_drift && !has_dist_drift {
+                    continue;
                 }
+
+                let mut line = format!(
+                    "  data drift:     {} mean_drift={:?} null_count_drift={}",
+                    col, d.mean_drift, d.null_count_drift,
+                );
+                if let Some(psi) = d.psi_statistic {
+                    line.push_str(&format!(" psi={psi:.4}"));
+                }
+                if let Some(ks) = d.ks_statistic {
+                    line.push_str(&format!(" ks={ks:.4}"));
+                    if let Some(p) = d.ks_p_value {
+                        line.push_str(&format!(" p={p:.4}"));
+                    }
+                }
+                writeln!(w, "{line}")?;
             }
         }
         if !r.semantic_drifts.is_empty() {
@@ -102,7 +122,6 @@ mod tests {
                 added_fields: vec![],
                 removed_fields: vec![],
                 changed_types: vec![],
-                semantic_drifts: vec![],
                 renamed_fields: vec![],
             },
             data_drift: DataDrift {
@@ -226,6 +245,74 @@ mod tests {
         };
         let out = capture(&[r]);
         assert!(!out.contains("data drift"));
+    }
+
+    #[test]
+    fn test_print_terminal_shows_psi_and_ks() {
+        // A column with no mean/null drift but a PSI/KS shift must still be shown,
+        // with the actual metric values that gate the plan exit code.
+        let mut drifts = HashMap::new();
+        let stats = ColumnStats {
+            null_count: 0,
+            row_count: 100,
+            mean: Some(1.0),
+            min: Some(0.0),
+            max: Some(2.0),
+        };
+        drifts.insert(
+            "score".into(),
+            ColumnDrift {
+                source_stats: stats.clone(),
+                target_stats: stats,
+                mean_drift: Some(0.0),
+                null_count_drift: 0,
+                ks_statistic: Some(0.42),
+                ks_p_value: Some(0.001),
+                psi_statistic: Some(0.37),
+            },
+        );
+        let mut r = empty_report();
+        r.data_drift = DataDrift {
+            column_drifts: drifts,
+        };
+        let out = capture(&[r]);
+        assert!(out.contains("data drift"));
+        assert!(out.contains("score"));
+        assert!(out.contains("psi=0.3700"));
+        assert!(out.contains("ks=0.4200"));
+        assert!(out.contains("p=0.0010"));
+    }
+
+    #[test]
+    fn test_print_terminal_data_drift_columns_sorted() {
+        // Output must be deterministic regardless of HashMap iteration order.
+        let stats = ColumnStats {
+            null_count: 0,
+            row_count: 10,
+            mean: Some(1.0),
+            min: Some(0.0),
+            max: Some(2.0),
+        };
+        let drift = |psi: f64| ColumnDrift {
+            source_stats: stats.clone(),
+            target_stats: stats.clone(),
+            mean_drift: Some(0.0),
+            null_count_drift: 0,
+            ks_statistic: None,
+            ks_p_value: None,
+            psi_statistic: Some(psi),
+        };
+        let mut drifts = HashMap::new();
+        drifts.insert("zebra".to_string(), drift(0.2));
+        drifts.insert("alpha".to_string(), drift(0.3));
+        let mut r = empty_report();
+        r.data_drift = DataDrift {
+            column_drifts: drifts,
+        };
+        let out = capture(&[r]);
+        let a = out.find("alpha").unwrap();
+        let z = out.find("zebra").unwrap();
+        assert!(a < z, "columns should be sorted alphabetically");
     }
 
     #[test]

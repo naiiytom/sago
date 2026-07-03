@@ -36,3 +36,7 @@ n = 1000
 # rules of thumb: <0.1 no shift, 0.1–0.25 moderate, >0.25 major.
 [checks]
 drift_threshold = 0.05
+# Minimum confidence (in [0, 1]) for a dropped+added column pair to be reported
+# as a rename rather than a drop + add. Raise for stricter matching. Optional;
+# defaults to 0.6. Overridable per-run with `--rename-threshold`.
+# rename_confidence_threshold = 0.6

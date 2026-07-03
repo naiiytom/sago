@@ -30,6 +30,11 @@ pub struct PlanArgs {
     /// Where to write the JSON artifact
     #[arg(long)]
     pub out: Option<PathBuf>,
+
+    /// Override the rename-detection confidence threshold in [0, 1]
+    /// (default: checks.rename_confidence_threshold from Sago.toml).
+    #[arg(long)]
+    pub rename_threshold: Option<f64>,
 }
 
 pub async fn run(args: &PlanArgs) -> Result<ExitCode> {
@@ -46,6 +51,13 @@ pub async fn run(args: &PlanArgs) -> Result<ExitCode> {
     }
     let state = ProjectState::load(&state_path)?;
     let threshold = cfg.checks.drift_threshold;
+
+    // CLI flag overrides the configured rename threshold; otherwise use config.
+    let rename_confidence = resolve_rename_threshold(
+        args.rename_threshold,
+        cfg.checks.rename_confidence_threshold,
+    )?;
+    let rename_opts = RenameOptions::with_min_confidence(rename_confidence);
 
     let mut reports = Vec::new();
     for (name, tgt) in &cfg.targets {
@@ -89,7 +101,7 @@ pub async fn run(args: &PlanArgs) -> Result<ExitCode> {
             &mut schema_drift,
             &baseline_profiles,
             &live_profiles,
-            &RenameOptions::default(),
+            &rename_opts,
         );
 
         let mut data_drift =
@@ -106,8 +118,11 @@ pub async fn run(args: &PlanArgs) -> Result<ExitCode> {
             }
         }
 
-        let semantic_drifts =
-            compute_semantic_drift(&snap.semantic_types, &live_snap.semantic_types);
+        let semantic_drifts = compute_semantic_drift(
+            &snap.semantic_types,
+            &live_snap.semantic_types,
+            &schema_drift,
+        );
 
         reports.push(DiffReport {
             source_identifier: format!("baseline:{}", name),
@@ -163,8 +178,11 @@ fn collect_breaches(reports: &[DiffReport], threshold: f64) -> Vec<String> {
 pub(crate) fn compute_semantic_drift(
     baseline: &HashMap<String, SemanticType>,
     live: &HashMap<String, SemanticType>,
+    schema_drift: &sago_core::drift::SchemaDrift,
 ) -> Vec<SemanticDrift> {
     let mut out = Vec::new();
+
+    // Columns present in both: report a change in inferred semantic type.
     for (name, b_type) in baseline {
         if let Some(l_type) = live.get(name)
             && b_type != l_type
@@ -176,6 +194,31 @@ pub(crate) fn compute_semantic_drift(
             });
         }
     }
+
+    // New live columns (absent from baseline) that carry a *concrete* semantic
+    // type are worth flagging too — e.g. a freshly-added `ssn`/`email` column is
+    // a governance signal, not a silent addition. Rename targets already surface
+    // as renames, so skip them here to avoid double-reporting.
+    let rename_targets: std::collections::HashSet<&str> = schema_drift
+        .renamed_fields
+        .iter()
+        .map(|r| r.to.as_str())
+        .collect();
+    for (name, l_type) in live {
+        if !baseline.contains_key(name)
+            && *l_type != SemanticType::Unknown
+            && !rename_targets.contains(name.as_str())
+        {
+            out.push(SemanticDrift {
+                field_name: name.clone(),
+                source_type: SemanticType::Unknown,
+                target_type: l_type.clone(),
+            });
+        }
+    }
+
+    // Deterministic order (HashMap iteration is unordered).
+    out.sort_by(|a, b| a.field_name.cmp(&b.field_name));
     out
 }
 
@@ -189,12 +232,40 @@ fn load_config(path: &Path) -> Result<Config> {
     Ok(Config::from_toml(&content)?)
 }
 
+/// The effective rename confidence: the `--rename-threshold` flag if given
+/// (validated to `[0, 1]`), else the value from config.
+pub(crate) fn resolve_rename_threshold(flag: Option<f64>, from_config: f64) -> Result<f64> {
+    match flag {
+        Some(t) if !(0.0..=1.0).contains(&t) => {
+            Err(anyhow!("--rename-threshold must be in [0.0, 1.0], got {t}"))
+        }
+        Some(t) => Ok(t),
+        None => Ok(from_config),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use sago_core::drift::{ColumnDrift, ColumnStats, DataDrift, SchemaDrift};
     use sago_core::semantic::SemanticType;
     use std::collections::HashMap;
+
+    #[test]
+    fn test_resolve_rename_threshold_flag_overrides_config() {
+        assert_eq!(resolve_rename_threshold(Some(0.8), 0.6).unwrap(), 0.8);
+    }
+
+    #[test]
+    fn test_resolve_rename_threshold_falls_back_to_config() {
+        assert_eq!(resolve_rename_threshold(None, 0.6).unwrap(), 0.6);
+    }
+
+    #[test]
+    fn test_resolve_rename_threshold_rejects_out_of_range_flag() {
+        assert!(resolve_rename_threshold(Some(1.5), 0.6).is_err());
+        assert!(resolve_rename_threshold(Some(-0.1), 0.6).is_err());
+    }
 
     fn drift_report_with_psi(target: &str, col: &str, psi: Option<f64>) -> DiffReport {
         let stats = ColumnStats {
@@ -224,7 +295,6 @@ mod tests {
                 added_fields: vec![],
                 removed_fields: vec![],
                 changed_types: vec![],
-                semantic_drifts: vec![],
                 renamed_fields: vec![],
             },
             data_drift: DataDrift { column_drifts },
@@ -252,9 +322,19 @@ mod tests {
         assert!(collect_breaches(&reports, 0.0).is_empty());
     }
 
+    fn empty_schema_drift() -> SchemaDrift {
+        SchemaDrift {
+            added_fields: vec![],
+            removed_fields: vec![],
+            changed_types: vec![],
+            renamed_fields: vec![],
+        }
+    }
+
     #[test]
     fn test_compute_semantic_drift_empty_maps() {
-        let result = compute_semantic_drift(&HashMap::new(), &HashMap::new());
+        let result =
+            compute_semantic_drift(&HashMap::new(), &HashMap::new(), &empty_schema_drift());
         assert!(result.is_empty());
     }
 
@@ -265,7 +345,7 @@ mod tests {
         baseline.insert("id".into(), SemanticType::UUID);
 
         let live = baseline.clone();
-        let result = compute_semantic_drift(&baseline, &live);
+        let result = compute_semantic_drift(&baseline, &live, &empty_schema_drift());
         assert!(result.is_empty());
     }
 
@@ -277,7 +357,7 @@ mod tests {
         let mut live = HashMap::new();
         live.insert("contact".into(), SemanticType::Unknown);
 
-        let result = compute_semantic_drift(&baseline, &live);
+        let result = compute_semantic_drift(&baseline, &live, &empty_schema_drift());
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].field_name, "contact");
         assert_eq!(result[0].source_type, SemanticType::Email);
@@ -296,7 +376,7 @@ mod tests {
         live.insert("b".into(), SemanticType::UUID); // unchanged
         live.insert("c".into(), SemanticType::Unknown);
 
-        let result = compute_semantic_drift(&baseline, &live);
+        let result = compute_semantic_drift(&baseline, &live, &empty_schema_drift());
         assert_eq!(result.len(), 2);
         let names: Vec<&str> = result.iter().map(|d| d.field_name.as_str()).collect();
         assert!(names.contains(&"a"));
@@ -314,7 +394,49 @@ mod tests {
         live.insert("email".into(), SemanticType::Email);
         // "dropped" is absent from live
 
-        let result = compute_semantic_drift(&baseline, &live);
+        let result = compute_semantic_drift(&baseline, &live, &empty_schema_drift());
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_compute_semantic_drift_reports_new_typed_live_column() {
+        // A brand-new live column carrying a concrete semantic type is surfaced,
+        // with Unknown as the (absent) baseline type.
+        let baseline = HashMap::new();
+        let mut live = HashMap::new();
+        live.insert("ssn".into(), SemanticType::CreditCard);
+        live.insert("noise".into(), SemanticType::Unknown); // must be ignored
+
+        let result = compute_semantic_drift(&baseline, &live, &empty_schema_drift());
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].field_name, "ssn");
+        assert_eq!(result[0].source_type, SemanticType::Unknown);
+        assert_eq!(result[0].target_type, SemanticType::CreditCard);
+    }
+
+    #[test]
+    fn test_compute_semantic_drift_skips_rename_target() {
+        // A new typed live column that is actually a rename target must not be
+        // double-reported (it already surfaces as a rename).
+        use sago_core::rename::{FieldRename, RenameSignals};
+        let baseline = HashMap::new();
+        let mut live = HashMap::new();
+        live.insert("email_address".into(), SemanticType::Email);
+
+        let mut sd = empty_schema_drift();
+        sd.renamed_fields = vec![FieldRename {
+            from: "email".into(),
+            to: "email_address".into(),
+            confidence: 0.95,
+            signals: RenameSignals {
+                type_match: true,
+                semantic_match: true,
+                name_similarity: 0.6,
+                stats_similarity: None,
+            },
+        }];
+
+        let result = compute_semantic_drift(&baseline, &live, &sd);
+        assert!(result.is_empty(), "rename target must not be reported");
     }
 }
