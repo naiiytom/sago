@@ -418,8 +418,8 @@ fn ks_from_sorted(source_vals: &[f64], target_vals: &[f64]) -> (Option<f64>, Opt
         1.0
     } else {
         let mut sum = 0.0;
-        for k in 1..=100 {
-            let sign = if k % 2 == 0 { -1.0 } else { 1.0 };
+        for k in 1u32..=100 {
+            let sign = if k.is_multiple_of(2) { -1.0 } else { 1.0 };
             sum += sign * (-2.0 * (k as f64 * lambda).powi(2)).exp();
         }
         (2.0 * sum).clamp(0.0, 1.0)
@@ -437,6 +437,24 @@ const PSI_EPSILON: f64 = 0.0001;
 /// that [`detect_data_drift`] computes from full record batches.
 pub fn psi_from_samples(source: &[f64], target: &[f64]) -> Option<f64> {
     calculate_psi(source, target)
+}
+
+/// The `q`-quantile (`q` in `[0, 1]`) of an already-ascending-sorted slice,
+/// using linear interpolation between order statistics (the common "type 7"
+/// definition). `sorted` must be non-empty.
+fn quantile_sorted(sorted: &[f64], q: f64) -> f64 {
+    let n = sorted.len();
+    if n == 1 {
+        return sorted[0];
+    }
+    let pos = q * (n - 1) as f64;
+    let lo = pos.floor() as usize;
+    let hi = pos.ceil() as usize;
+    if lo == hi {
+        return sorted[lo];
+    }
+    let frac = pos - lo as f64;
+    sorted[lo] + frac * (sorted[hi] - sorted[lo])
 }
 
 fn calculate_psi(source: &[f64], target: &[f64]) -> Option<f64> {
@@ -466,17 +484,32 @@ fn calculate_psi(source: &[f64], target: &[f64]) -> Option<f64> {
         return Some(0.0);
     }
 
-    let bin_width = (max_val - min_val) / PSI_NUM_BINS as f64;
+    // Bin edges are the reference (source) distribution's deciles rather than
+    // fixed equal-width cuts. Equal-width bins put almost all mass in one bucket
+    // for skewed columns, so a real shift *within* the dense region is diluted
+    // across empty bins and missed; quantile bins allocate resolution where the
+    // data actually is. This is the standard PSI construction.
+    let mut sorted_src = source.clone();
+    sorted_src.sort_by(|a, b| a.total_cmp(b));
+    // PSI_NUM_BINS bins ⇒ PSI_NUM_BINS-1 interior edges at deciles 0.1..0.9.
+    // Edges are non-decreasing; duplicates (from ties in the reference) simply
+    // yield unreachable bins, which contribute 0 to the sum.
+    let edges: Vec<f64> = (1..PSI_NUM_BINS)
+        .map(|i| quantile_sorted(&sorted_src, i as f64 / PSI_NUM_BINS as f64))
+        .collect();
+
+    // Bin index of `v`: the number of edges it lies at or above, in
+    // `0..PSI_NUM_BINS`. Same rule for both samples, so the comparison is
+    // consistent regardless of the `<=` vs `<` boundary choice.
+    let bin_of = |v: f64| -> usize { edges.partition_point(|&e| e <= v) };
+
     let mut source_counts = [0usize; PSI_NUM_BINS];
     let mut target_counts = [0usize; PSI_NUM_BINS];
-
     for &v in &source {
-        let idx = (((v - min_val) / bin_width) as usize).min(PSI_NUM_BINS - 1);
-        source_counts[idx] += 1;
+        source_counts[bin_of(v)] += 1;
     }
     for &v in &target {
-        let idx = (((v - min_val) / bin_width) as usize).min(PSI_NUM_BINS - 1);
-        target_counts[idx] += 1;
+        target_counts[bin_of(v)] += 1;
     }
 
     let n_src = source.len() as f64;
@@ -1005,6 +1038,67 @@ mod tests {
         let col = drift.column_drifts.get("val").unwrap();
         assert!(col.psi_statistic.is_some());
         assert!(col.psi_statistic.unwrap() > 0.1);
+    }
+
+    // ── quantile binning ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_quantile_sorted_interpolates() {
+        let s = [0.0, 10.0, 20.0, 30.0, 40.0]; // n = 5
+        assert_eq!(quantile_sorted(&s, 0.0), 0.0);
+        assert_eq!(quantile_sorted(&s, 1.0), 40.0);
+        assert_eq!(quantile_sorted(&s, 0.5), 20.0); // median = middle element
+        // 0.25 * (5-1) = pos 1.0 → exactly the second element.
+        assert_eq!(quantile_sorted(&s, 0.25), 10.0);
+        // 0.125 * 4 = pos 0.5 → halfway between 0 and 10.
+        assert_eq!(quantile_sorted(&s, 0.125), 5.0);
+    }
+
+    #[test]
+    fn test_quantile_sorted_single_element() {
+        assert_eq!(quantile_sorted(&[7.0], 0.0), 7.0);
+        assert_eq!(quantile_sorted(&[7.0], 0.9), 7.0);
+    }
+
+    #[test]
+    fn test_psi_quantile_identical_distributions_is_zero() {
+        // Reference deciles bin its own data evenly; identical target ⇒ PSI ~0.
+        let vals: Vec<f64> = (0..100).map(|i| i as f64).collect();
+        let psi = psi_from_samples(&vals, &vals).unwrap();
+        assert!(
+            psi.abs() < 1e-9,
+            "identical dists should give ~0 PSI, got {psi}"
+        );
+    }
+
+    #[test]
+    fn test_psi_quantile_detects_shift_in_dense_region_of_skewed_data() {
+        // Heavily right-skewed reference: most mass in [0, 10], a long thin tail
+        // out to 1000. The target keeps the same tail but shifts the *dense*
+        // bulk from ~[0,10] up to ~[10,20]. Equal-width bins (width ~100) put the
+        // entire bulk in bin 0 for both samples and miss this; quantile bins,
+        // cut at the reference's deciles (which are all down in the dense
+        // region), resolve the shift.
+        let mut reference = Vec::new();
+        for i in 0..90 {
+            reference.push((i % 10) as f64); // bulk in [0, 9]
+        }
+        for i in 0..10 {
+            reference.push(100.0 + i as f64 * 90.0); // sparse tail up to ~910
+        }
+        let mut current = Vec::new();
+        for i in 0..90 {
+            current.push(10.0 + (i % 10) as f64); // bulk shifted to [10, 19]
+        }
+        for i in 0..10 {
+            current.push(100.0 + i as f64 * 90.0); // same tail
+        }
+
+        let psi = psi_from_samples(&reference, &current).unwrap();
+        assert!(
+            psi > 0.25,
+            "quantile PSI should flag a major shift in the dense region, got {psi}"
+        );
     }
 
     // ── NaN handling ─────────────────────────────────────────────────────────

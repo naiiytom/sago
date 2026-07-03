@@ -22,15 +22,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install stable toolchain
-        uses: dtolnay/rust-toolchain@stable
+      # Pin the lint toolchain (not floating `stable`) so a new Rust release
+      # adding lints can't turn previously-clean code into a red CI on unrelated
+      # PRs. Bump this deliberately, in step with workspace.package.rust-version.
+      - name: Install pinned toolchain (MSRV)
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.89"
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
       - name: cargo clippy -D warnings
         run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: cargo clippy (sago-sdk grpc feature) -D warnings
+        run: cargo clippy -p sago-sdk --features grpc --all-targets -- -D warnings
 
   # Build + test on the pinned MSRV and on stable, so a regression on either is caught.
   test:
@@ -39,7 +45,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        rust: ["1.85", stable]
+        # Pinned MSRV (see workspace.package.rust-version) + stable.
+        rust: ["1.89", stable]
     steps:
       - uses: actions/checkout@v4
       - name: Install ${{ matrix.rust }} toolchain
@@ -51,6 +58,8 @@ jobs:
         run: cargo test --workspace --all-targets
       - name: cargo test --doc
         run: cargo test --workspace --doc
+      - name: cargo test (sago-sdk grpc feature)
+        run: cargo test -p sago-sdk --features grpc --all-targets
 
   # Prove the pure-analysis modules still build without the `io` feature for the
   # browser/edge target — the feature-gating contract the WASM crate depends on.

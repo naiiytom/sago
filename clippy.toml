@@ -1,3 +1,4 @@
 # Project-wide Clippy configuration. The MSRV lets Clippy avoid suggesting APIs
-# newer than the crate's minimum supported Rust version.
-msrv = "1.85"
+# newer than the crate's minimum supported Rust version. Kept in sync with
+# workspace.package.rust-version in Cargo.toml.
+msrv = "1.89"

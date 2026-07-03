@@ -23,6 +23,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   floor so near-miss sibling columns (`address_line1`/`address_line2`) are not
   mistaken for renames.
 
+### Changed
+
+- **PSI now uses quantile (decile) binning** instead of 10 equal-width bins. Bin
+  edges are the reference sample's deciles, so drift in the dense region of a
+  skewed column is detected instead of being diluted across mostly-empty bins.
+- **MSRV raised to Rust 1.89** (from 1.85). The bump is driven entirely by the
+  dependency tree — `ratatui` 0.30 and `tonic` 0.14 require 1.88, and transitive
+  deps (e.g. `crc-fast`) require 1.89 — not by the crate's own source. CI pins
+  the MSRV job to 1.89.
+
 ### Removed
 
 - Dead `SchemaDrift.semantic_drifts` field (semantic drift lives on `DiffReport`);
@@ -30,6 +40,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **gRPC `SagoService` server**: `sago-sdk::grpc::ProviderService` (behind the
+  new `sago-sdk` `grpc` feature) wraps any `DataProvider` and serves the
+  `GetSchema`/`Diff` RPCs over tonic, with proto↔core type conversions, an
+  end-to-end client/server test, and a `grpc_server` example. This turns the
+  previously stub-only `sago-proto` service into a runnable node.
+- **SDK ergonomics**: `sago-sdk` now re-exports the `DataProvider`/`SchemaProvider`
+  traits (implement a custom source without depending on `sago-core` directly),
+  the `diff`/`diff_datasets*` functions, a crate-level guide, and docs on
+  `SagoClient::snapshot`. `sago-proto` re-exports its `v1::*` message types at
+  the crate root.
 - **PSI / KS in reports**: `sago plan` and `sago diff` now print the `psi=`,
   `ks=`, and `p=` values per drifted column — the metrics that gate the exit
   code — with deterministic (sorted) column ordering.

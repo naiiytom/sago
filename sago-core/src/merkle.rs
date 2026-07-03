@@ -161,11 +161,11 @@ impl MerkleTree {
         // Walk every level except the root.
         for level in &self.levels[..self.levels.len() - 1] {
             // A promoted odd node has no sibling at this level; it simply rises.
-            if idx == level.len() - 1 && level.len() % 2 == 1 {
+            if idx == level.len() - 1 && !level.len().is_multiple_of(2) {
                 idx /= 2;
                 continue;
             }
-            let (sibling, sibling_is_left) = if idx % 2 == 0 {
+            let (sibling, sibling_is_left) = if idx.is_multiple_of(2) {
                 (level[idx + 1], false)
             } else {
                 (level[idx - 1], true)
