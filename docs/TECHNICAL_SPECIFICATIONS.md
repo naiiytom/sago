@@ -41,7 +41,7 @@ Sago is designed as a modular system with a core engine responsible for the heav
 ## Known Limitations
 - S3 provider supports Parquet, CSV, and NDJSON/JSON, selected by file extension or an explicit `format` override; other formats are not yet supported.
 - KS test p-value uses a 100-term asymptotic expansion; accuracy degrades for very small samples (n < 30).
-- PSI is computed with 10 equal-width bins; very skewed distributions may benefit from quantile binning (future work).
+- PSI is computed with 10 bins whose edges are the **deciles of the reference (baseline) sample** (quantile binning), so skewed columns keep resolution where the data is dense. Ties in the reference can collapse adjacent edges, leaving fewer effective bins.
 - Semantic type inference samples the first 100 values per column only.
 - `plan` compares persisted column statistics against a freshly captured snapshot, so it reports schema, semantic, mean, and null-count drift; full-distribution metrics (KS, PSI) are produced only by `diff`, which reads complete record batches from both sides.
 - Rename detection requires an exact data-type match (the type gate) and a blended confidence ≥ 0.6; type-changing renames and very low-signal pairs (unrelated names, no semantics, no comparable stats) are left as separate add/remove entries. Matching is greedy 1:1, so an ambiguous many-to-many rename resolves to the highest-confidence non-conflicting pairing.

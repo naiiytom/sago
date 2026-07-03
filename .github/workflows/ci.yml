@@ -31,6 +31,8 @@ jobs:
         run: cargo fmt --all -- --check
       - name: cargo clippy -D warnings
         run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: cargo clippy (sago-sdk grpc feature) -D warnings
+        run: cargo clippy -p sago-sdk --features grpc --all-targets -- -D warnings
 
   # Build + test on the pinned MSRV and on stable, so a regression on either is caught.
   test:
@@ -52,6 +54,8 @@ jobs:
         run: cargo test --workspace --all-targets
       - name: cargo test --doc
         run: cargo test --workspace --doc
+      - name: cargo test (sago-sdk grpc feature)
+        run: cargo test -p sago-sdk --features grpc --all-targets
 
   # Prove the pure-analysis modules still build without the `io` feature for the
   # browser/edge target — the feature-gating contract the WASM crate depends on.

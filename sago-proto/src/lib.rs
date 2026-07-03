@@ -16,10 +16,14 @@ pub mod v1 {
     tonic::include_proto!("sago.v1");
 }
 
-// Re-export the most commonly used items at the crate root for convenience.
+// Re-export the commonly used generated items at the crate root for
+// convenience, so consumers write `sago_proto::Field` instead of
+// `sago_proto::v1::Field`. Covers the message/enum types a gRPC server or client
+// needs when converting to/from the core domain types.
 pub use v1::{
-    DiffReport, DiffRequest, DiffResponse, GetSchemaRequest, GetSchemaResponse, SchemaDrift,
-    SemanticType, sago_service_client::SagoServiceClient, sago_service_server::SagoServiceServer,
+    ColumnDrift, ColumnStats, DataDrift, DiffReport, DiffRequest, DiffResponse, Field, FieldRename,
+    GetSchemaRequest, GetSchemaResponse, Schema, SchemaDrift, SemanticDrift, SemanticType,
+    TypeChange, sago_service_client::SagoServiceClient, sago_service_server::SagoServiceServer,
 };
 
 #[cfg(test)]

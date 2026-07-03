@@ -3540,10 +3540,15 @@ version = "0.1.0"
 dependencies = [
  "arrow",
  "async-trait",
+ "prost",
  "sago-core",
+ "sago-proto",
  "serde",
  "tempfile",
  "tokio",
+ "tokio-stream",
+ "tonic",
+ "tonic-prost",
 ]
 
 [[package]]

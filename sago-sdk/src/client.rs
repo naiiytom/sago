@@ -31,6 +31,19 @@ impl SagoClient {
         Ok(provider.clone())
     }
 
+    /// Capture a [`TargetSnapshot`] of `identifier` (a table name for Postgres,
+    /// an object key for S3) — its schema, per-column stats, and inferred
+    /// semantic types.
+    ///
+    /// The first call lazily builds the underlying provider and reuses it for
+    /// every subsequent call; for Postgres this stands up a connection pool
+    /// (5 connections), so a `SagoClient` is cheap to create but the first
+    /// `snapshot` pays the connection cost.
+    ///
+    /// `sample_n` controls persistence of the per-column numeric samples used
+    /// for the PSI drift metric: `Some(n)` retains up to `n` values per numeric
+    /// column, `None` skips sample capture (so PSI-based drift can't later be
+    /// computed against this snapshot).
     pub async fn snapshot(
         &self,
         identifier: &str,
