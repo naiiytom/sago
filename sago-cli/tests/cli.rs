@@ -41,6 +41,30 @@ fn test_init_creates_skeleton() {
 }
 
 #[test]
+fn test_init_scaffold_is_valid_and_usable() {
+    // Regression: a freshly-initialized project must produce a *parseable*
+    // Sago.toml. Previously the skeleton commented out all connections/targets
+    // while those fields were required, so the user's first `apply` died with
+    // `missing field 'connections'`. `apply` should now succeed with a
+    // "nothing to apply" message instead.
+    let tmp = tempfile::tempdir().unwrap();
+    Command::cargo_bin("sago")
+        .unwrap()
+        .args(["init", "fresh"])
+        .current_dir(tmp.path())
+        .assert()
+        .success();
+
+    Command::cargo_bin("sago")
+        .unwrap()
+        .arg("apply")
+        .current_dir(tmp.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("nothing to apply"));
+}
+
+#[test]
 fn test_init_refuses_existing_project() {
     let tmp = tempfile::tempdir().unwrap();
     std::fs::write(tmp.path().join("Sago.toml"), "# already here").unwrap();
@@ -71,6 +95,77 @@ identifier = "events.parquet"
 [checks]
 drift_threshold = 0.05
 "#;
+
+// A config whose target references a connection that does not exist, to
+// exercise apply/plan error paths without needing a live data source.
+const BAD_CONN_TOML: &str = r#"
+[project]
+name = "test"
+version = "0.1.0"
+
+[connections.archive]
+type = "s3"
+bucket = "my-data"
+region = "us-east-1"
+
+[targets.events]
+connection = "archive"
+identifier = "events.parquet"
+
+[targets.orphan]
+connection = "does_not_exist"
+identifier = "x.parquet"
+
+[checks]
+drift_threshold = 0.05
+"#;
+
+#[test]
+fn test_apply_fails_on_unknown_connection_reference() {
+    // A target referencing a non-existent connection must fail loudly.
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("Sago.toml"), BAD_CONN_TOML).unwrap();
+    Command::cargo_bin("sago")
+        .unwrap()
+        .args(["apply", "--target", "orphan"])
+        .current_dir(tmp.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unknown connection"));
+}
+
+#[test]
+fn test_apply_target_filter_skips_other_targets() {
+    // With --target naming a well-formed (but S3) target, the orphan target's
+    // bad connection is never touched, so we don't get the unknown-connection
+    // error. (The S3 fetch itself will fail on network/creds, but crucially NOT
+    // with "unknown connection" — proving the filter excluded 'orphan'.)
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("Sago.toml"), BAD_CONN_TOML).unwrap();
+    let out = Command::cargo_bin("sago")
+        .unwrap()
+        .args(["apply", "--target", "events"])
+        .current_dir(tmp.path())
+        .assert();
+    let stderr = String::from_utf8_lossy(&out.get_output().stderr).to_string();
+    assert!(
+        !stderr.contains("unknown connection"),
+        "the orphan target should have been filtered out, but got: {stderr}"
+    );
+}
+
+#[test]
+fn test_apply_nonexistent_target_does_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("Sago.toml"), SAMPLE_TOML).unwrap();
+    Command::cargo_bin("sago")
+        .unwrap()
+        .args(["apply", "--target", "no_such_target"])
+        .current_dir(tmp.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("nothing to apply"));
+}
 
 #[test]
 fn test_apply_fails_without_sago_toml() {
@@ -121,6 +216,51 @@ fn test_plan_fails_without_state() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("apply").or(predicate::str::contains("state")));
+}
+
+#[test]
+fn test_plan_nonexistent_target_exits_success() {
+    // With a state file present but --target naming an unknown target, plan has
+    // nothing to compare and must exit 0 (not the drift-breach failure code).
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("Sago.toml"), SAMPLE_TOML).unwrap();
+    let sago_dir = tmp.path().join(".sago");
+    std::fs::create_dir_all(&sago_dir).unwrap();
+    std::fs::write(
+        sago_dir.join("state.json"),
+        r#"{"schema_version":1,"snapshots":{}}"#,
+    )
+    .unwrap();
+
+    Command::cargo_bin("sago")
+        .unwrap()
+        .args(["plan", "--target", "no_such_target"])
+        .current_dir(tmp.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("nothing to plan"));
+}
+
+#[test]
+fn test_plan_rejects_out_of_range_rename_threshold() {
+    // The --rename-threshold flag is validated to [0, 1].
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("Sago.toml"), SAMPLE_TOML).unwrap();
+    let sago_dir = tmp.path().join(".sago");
+    std::fs::create_dir_all(&sago_dir).unwrap();
+    std::fs::write(
+        sago_dir.join("state.json"),
+        r#"{"schema_version":1,"snapshots":{}}"#,
+    )
+    .unwrap();
+
+    Command::cargo_bin("sago")
+        .unwrap()
+        .args(["plan", "--rename-threshold", "1.5"])
+        .current_dir(tmp.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("rename-threshold"));
 }
 
 #[test]

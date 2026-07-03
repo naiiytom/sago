@@ -1,0 +1,4 @@
+# Formatting is intentionally close to rustfmt defaults; only stable options are
+# set here so `cargo fmt --check` behaves identically on the stable CI toolchain.
+edition = "2024"
+max_width = 100

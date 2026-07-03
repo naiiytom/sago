@@ -189,4 +189,40 @@ mod tests {
         }];
         assert!(build_schema(&fields).is_err());
     }
+
+    #[test]
+    fn test_build_schema_error_names_the_bad_type() {
+        // The error surfaced to JS (via to_js_err) must carry the offending type
+        // string so a caller can diagnose it, not an opaque failure.
+        let fields = vec![WasmField {
+            name: "x".into(),
+            data_type: "NotAType".into(),
+            nullable: false,
+        }];
+        let err = build_schema(&fields).unwrap_err();
+        assert!(
+            err.contains("NotAType"),
+            "error should name the bad type, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_merge_reports_conflict_without_erroring() {
+        // A genuine add/add conflict is data, not an error: merge_schemas returns
+        // a result whose `clean` is false, rather than failing the call.
+        let base: Vec<WasmField> = vec![];
+        let mk = |dt: &str| {
+            vec![WasmField {
+                name: "tag".into(),
+                data_type: dt.into(),
+                nullable: false,
+            }]
+        };
+        let b = build_schema(&base).unwrap();
+        let o = build_schema(&mk("Utf8")).unwrap();
+        let t = build_schema(&mk("Int64")).unwrap();
+        let result = three_way_merge(&b, &o, &t);
+        assert!(!result.is_clean());
+        assert_eq!(result.conflicts.len(), 1);
+    }
 }
