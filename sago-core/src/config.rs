@@ -6,7 +6,13 @@ use std::collections::HashMap;
 #[serde(deny_unknown_fields)]
 pub struct Config {
     pub project: ProjectConfig,
+    /// Named data-source connections. Defaults to empty so a freshly
+    /// `sago init`ed project (which has all connections commented out) still
+    /// parses; `apply`/`plan` then simply report "nothing to do".
+    #[serde(default)]
     pub connections: HashMap<String, ConnectionConfig>,
+    /// Datasets to track. Defaults to empty for the same reason as `connections`.
+    #[serde(default)]
     pub targets: HashMap<String, TargetConfig>,
     pub checks: ChecksConfig,
 }
@@ -408,7 +414,9 @@ whatever = true
     }
 
     #[test]
-    fn test_missing_required_field() {
+    fn test_missing_required_project_field() {
+        // `project` and `checks` are still required; `connections`/`targets`
+        // default to empty. Omitting `project` must error.
         let toml = r#"
 [connections.c]
 type = "s3"
@@ -422,6 +430,25 @@ drift_threshold = 0.05
 "#;
         let result = Config::from_toml(toml);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_minimal_config_without_connections_or_targets_parses() {
+        // Regression: a freshly `sago init`ed project comments out all
+        // connections/targets. That config must parse (both default to empty),
+        // so the user's first `apply` reports "nothing to do" instead of a
+        // cryptic `missing field 'connections'`.
+        let toml = r#"
+[project]
+name = "fresh"
+version = "0.1.0"
+
+[checks]
+drift_threshold = 0.05
+"#;
+        let cfg = Config::from_toml(toml).expect("minimal init config must parse");
+        assert!(cfg.connections.is_empty());
+        assert!(cfg.targets.is_empty());
     }
 
     #[test]
