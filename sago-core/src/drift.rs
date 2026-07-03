@@ -1,5 +1,9 @@
+use crate::schema_codec::serialize_data_type;
 use crate::semantic::{SemanticType, infer_semantic_type};
-use arrow::array::{Array, Float32Array, Float64Array, Int16Array, Int32Array, Int64Array};
+use arrow::array::{
+    Array, Float32Array, Float64Array, Int8Array, Int16Array, Int32Array, Int64Array, UInt8Array,
+    UInt16Array, UInt32Array, UInt64Array,
+};
 use arrow::datatypes::{DataType, Schema};
 use arrow::record_batch::RecordBatch;
 use serde::{Deserialize, Serialize};
@@ -101,8 +105,8 @@ pub fn detect_schema_drift(source: &Schema, target: &Schema) -> SchemaDrift {
         if source_field.data_type() != target_field.data_type() {
             changed_types.push(TypeChange {
                 field_name: field_name.clone(),
-                old_type: format!("{:?}", source_field.data_type()),
-                new_type: format!("{:?}", target_field.data_type()),
+                old_type: serialize_data_type(source_field.data_type()),
+                new_type: serialize_data_type(target_field.data_type()),
             });
         }
     }
@@ -154,29 +158,50 @@ pub fn detect_semantic_drift(
 fn is_supported_numeric(dt: &DataType) -> bool {
     matches!(
         dt,
-        DataType::Int16 | DataType::Int32 | DataType::Int64 | DataType::Float32 | DataType::Float64
+        DataType::Int8
+            | DataType::Int16
+            | DataType::Int32
+            | DataType::Int64
+            | DataType::UInt8
+            | DataType::UInt16
+            | DataType::UInt32
+            | DataType::UInt64
+            | DataType::Float32
+            | DataType::Float64
     )
 }
 
 /// Call `f` with every non-null value of `column` as an `f64`, downcasting the
 /// array exactly once. Does nothing for non-numeric columns. Centralises the
 /// per-type downcast so callers don't re-match `data_type()` per row.
+///
+/// `NaN` values are skipped: they carry no distributional information and would
+/// otherwise poison downstream statistics — a single `NaN` collapses PSI's
+/// min/max-derived bins (every value maps to bin 0) and drags a running mean to
+/// `NaN`. Treating them like nulls keeps every metric well-defined.
 fn for_each_numeric(column: &dyn Array, mut f: impl FnMut(f64)) {
     macro_rules! iter_array {
         ($ty:ty, $cast:expr) => {{
             let arr = column.as_any().downcast_ref::<$ty>().unwrap();
             for i in 0..arr.len() {
                 if !arr.is_null(i) {
-                    let v = arr.value(i);
-                    f($cast(v));
+                    let v = $cast(arr.value(i));
+                    if !v.is_nan() {
+                        f(v);
+                    }
                 }
             }
         }};
     }
     match column.data_type() {
+        DataType::Int8 => iter_array!(Int8Array, |v| v as f64),
         DataType::Int16 => iter_array!(Int16Array, |v| v as f64),
         DataType::Int32 => iter_array!(Int32Array, |v| v as f64),
         DataType::Int64 => iter_array!(Int64Array, |v| v as f64),
+        DataType::UInt8 => iter_array!(UInt8Array, |v| v as f64),
+        DataType::UInt16 => iter_array!(UInt16Array, |v| v as f64),
+        DataType::UInt32 => iter_array!(UInt32Array, |v| v as f64),
+        DataType::UInt64 => iter_array!(UInt64Array, |v| v as f64),
         DataType::Float32 => iter_array!(Float32Array, |v| v as f64),
         DataType::Float64 => iter_array!(Float64Array, |v: f64| v),
         _ => {}
@@ -417,6 +442,13 @@ pub fn psi_from_samples(source: &[f64], target: &[f64]) -> Option<f64> {
 }
 
 fn calculate_psi(source: &[f64], target: &[f64]) -> Option<f64> {
+    // Drop NaN up front so the metric is self-consistent regardless of caller.
+    // `for_each_numeric` already skips NaN on the batch path, but the public
+    // `psi_from_samples` entry point can be handed arbitrary slices; an unfiltered
+    // NaN both escapes the finite min/max (which ignore NaN) and then bins into
+    // bin 0 via `NaN as usize == 0`, fabricating a meaningless PSI.
+    let source: Vec<f64> = source.iter().copied().filter(|v| !v.is_nan()).collect();
+    let target: Vec<f64> = target.iter().copied().filter(|v| !v.is_nan()).collect();
     if source.is_empty() || target.is_empty() {
         return None;
     }
@@ -440,11 +472,11 @@ fn calculate_psi(source: &[f64], target: &[f64]) -> Option<f64> {
     let mut source_counts = [0usize; PSI_NUM_BINS];
     let mut target_counts = [0usize; PSI_NUM_BINS];
 
-    for &v in source {
+    for &v in &source {
         let idx = (((v - min_val) / bin_width) as usize).min(PSI_NUM_BINS - 1);
         source_counts[idx] += 1;
     }
-    for &v in target {
+    for &v in &target {
         let idx = (((v - min_val) / bin_width) as usize).min(PSI_NUM_BINS - 1);
         target_counts[idx] += 1;
     }
@@ -975,5 +1007,78 @@ mod tests {
         let col = drift.column_drifts.get("val").unwrap();
         assert!(col.psi_statistic.is_some());
         assert!(col.psi_statistic.unwrap() > 0.1);
+    }
+
+    // ── NaN handling ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_nan_values_are_skipped_in_stats() {
+        // A NaN in a float column must be ignored like a null, not poison the mean.
+        let batch = f64_batch("v", vec![Some(1.0), Some(f64::NAN), Some(3.0)]);
+        let stats = calculate_column_stats(&[batch], "v").unwrap();
+        assert_eq!(stats.mean, Some(2.0)); // (1+3)/2, NaN excluded
+        assert_eq!(stats.min, Some(1.0));
+        assert_eq!(stats.max, Some(3.0));
+    }
+
+    #[test]
+    fn test_extract_numeric_values_skips_nan() {
+        let batch = f64_batch("v", vec![Some(1.0), Some(f64::NAN), Some(2.0)]);
+        let vals = extract_numeric_values(&[batch], "v");
+        assert_eq!(vals, vec![1.0, 2.0]);
+    }
+
+    #[test]
+    fn test_psi_finite_with_nan_present() {
+        // Regression: a NaN used to collapse every value into bin 0, distorting
+        // PSI. With NaN skipped, identical (NaN-laced) distributions give PSI 0.
+        let b1 = f64_batch("v", vec![Some(1.0), Some(2.0), Some(f64::NAN), Some(3.0)]);
+        let b2 = f64_batch("v", vec![Some(1.0), Some(2.0), Some(3.0)]);
+        let drift = detect_data_drift(&[b1], &[b2]);
+        let col = drift.column_drifts.get("v").unwrap();
+        let psi = col.psi_statistic.unwrap();
+        assert!(psi.is_finite());
+        assert!((psi - 0.0).abs() < 1e-9, "expected ~0 PSI, got {psi}");
+    }
+
+    #[test]
+    fn test_psi_from_samples_all_nan_is_none() {
+        // Public entry point handed a degenerate all-NaN slice must not fabricate
+        // a PSI: the range is non-finite, so the metric is undefined.
+        let nans = vec![f64::NAN, f64::NAN];
+        assert_eq!(psi_from_samples(&nans, &[1.0, 2.0]), None);
+    }
+
+    // ── unsigned & 8-bit integer support ─────────────────────────────────────
+
+    #[test]
+    fn test_uint32_column_participates_in_drift() {
+        use arrow::array::UInt32Array;
+        let schema = Arc::new(Schema::new(vec![Field::new("u", DataType::UInt32, true)]));
+        let src = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(UInt32Array::from(vec![1u32, 2, 3, 4, 5]))],
+        )
+        .unwrap();
+        let tgt = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(UInt32Array::from(vec![6u32, 7, 8, 9, 10]))],
+        )
+        .unwrap();
+        let drift = detect_data_drift(&[src], &[tgt]);
+        let col = drift.column_drifts.get("u").unwrap();
+        assert_eq!(col.source_stats.mean, Some(3.0));
+        assert!(col.ks_statistic.is_some());
+        assert!(col.psi_statistic.is_some());
+    }
+
+    #[test]
+    fn test_int8_and_uint64_supported_numeric() {
+        assert!(is_supported_numeric(&DataType::Int8));
+        assert!(is_supported_numeric(&DataType::UInt8));
+        assert!(is_supported_numeric(&DataType::UInt16));
+        assert!(is_supported_numeric(&DataType::UInt32));
+        assert!(is_supported_numeric(&DataType::UInt64));
+        assert!(!is_supported_numeric(&DataType::Utf8));
     }
 }

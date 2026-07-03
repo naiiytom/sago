@@ -42,11 +42,14 @@ version = "0.1.0"
 # connection = "warehouse"
 # identifier = "public.users"
 
-# Optional sample persistence per target:
+# Distribution-drift sampling is ON by default (it backs `sago plan`'s PSI
+# gate). Add this block only to tune the sample size or opt out per target:
 # [targets.users.sample]
-# enabled = true
-# n       = 1000
+# enabled = false   # opt this target out of drift sampling
+# n       = 1000    # or just tune the sample size
 
+# drift_threshold gates `sago plan` on PSI (must be in [0, 1]): a column whose
+# PSI exceeds it fails the plan with a non-zero exit code, so CI can gate on it.
 [checks]
 drift_threshold = 0.05
 "#

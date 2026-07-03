@@ -56,16 +56,29 @@ pub struct TargetConfig {
     pub owner: Option<String>,
 }
 
+/// Default number of numeric values retained per column when sampling.
+///
+/// Large enough for a stable 10-bin PSI without materializing whole columns; the
+/// single source of truth shared by config defaults and the CLI's live sampling.
+pub const DEFAULT_SAMPLE_N: usize = 1000;
+
 #[derive(Debug, Deserialize)]
 pub struct SampleConfig {
-    #[serde(default)]
+    /// Whether to persist per-column numeric samples for this target. Defaults to
+    /// `true`: samples are what `sago plan`'s PSI drift gate compares against, so
+    /// without them the gate is silently inert. Set `enabled = false` to opt out.
+    #[serde(default = "default_sample_enabled")]
     pub enabled: bool,
     #[serde(default = "default_sample_n")]
     pub n: usize,
 }
 
+fn default_sample_enabled() -> bool {
+    true
+}
+
 fn default_sample_n() -> usize {
-    1000
+    DEFAULT_SAMPLE_N
 }
 
 #[derive(Debug, Deserialize)]
@@ -87,7 +100,27 @@ impl Config {
                 "config uses obsolete [schema] block — replace with [targets.<name>] entries; see docs".into(),
             ));
         }
-        Ok(value.try_into()?)
+        let config: Config = value.try_into()?;
+        config.validate()?;
+        Ok(config)
+    }
+
+    /// Semantic validation applied after deserialization succeeds.
+    ///
+    /// `drift_threshold` gates on the Population Stability Index, which is a
+    /// non-negative divergence in `[0, ∞)` but is only meaningful for drift
+    /// alerting within `[0, 1]` (the rules of thumb cap at 0.25 "major shift").
+    /// A negative threshold makes *every* column breach; a threshold above 1.0
+    /// effectively disables detection. Both are almost certainly misconfigurations,
+    /// so reject them at parse time rather than silently inverting/disabling the gate.
+    fn validate(&self) -> Result<()> {
+        let t = self.checks.drift_threshold;
+        if !t.is_finite() || !(0.0..=1.0).contains(&t) {
+            return Err(crate::SagoError::Config(format!(
+                "checks.drift_threshold must be in [0.0, 1.0], got {t}"
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -225,7 +258,61 @@ drift_threshold = 0.05
         let cfg = Config::from_toml(toml).unwrap();
         let sample = cfg.targets["t"].sample.as_ref().unwrap();
         assert!(sample.enabled);
-        assert_eq!(sample.n, 1000); // default
+        assert_eq!(sample.n, DEFAULT_SAMPLE_N); // default
+    }
+
+    #[test]
+    fn test_sample_block_enabled_defaults_true() {
+        // A sample block present but without `enabled` must default to enabled,
+        // so drift sampling is on unless the user explicitly opts out.
+        let toml = r#"
+[project]
+name = "p"
+version = "1"
+
+[connections.c]
+type = "s3"
+bucket = "b"
+region = "r"
+
+[targets.t]
+connection = "c"
+identifier = "x"
+[targets.t.sample]
+n = 50
+
+[checks]
+drift_threshold = 0.05
+"#;
+        let cfg = Config::from_toml(toml).unwrap();
+        let sample = cfg.targets["t"].sample.as_ref().unwrap();
+        assert!(sample.enabled, "sample.enabled should default to true");
+        assert_eq!(sample.n, 50);
+    }
+
+    #[test]
+    fn test_sample_can_be_explicitly_disabled() {
+        let toml = r#"
+[project]
+name = "p"
+version = "1"
+
+[connections.c]
+type = "s3"
+bucket = "b"
+region = "r"
+
+[targets.t]
+connection = "c"
+identifier = "x"
+[targets.t.sample]
+enabled = false
+
+[checks]
+drift_threshold = 0.05
+"#;
+        let cfg = Config::from_toml(toml).unwrap();
+        assert!(!cfg.targets["t"].sample.as_ref().unwrap().enabled);
     }
 
     #[test]
@@ -325,6 +412,54 @@ drift_threshold = 0.05
     fn test_invalid_toml_syntax() {
         let result = Config::from_toml("this is not valid toml ][[[");
         assert!(result.is_err());
+    }
+
+    fn config_with_threshold(t: &str) -> crate::Result<Config> {
+        let toml = format!(
+            r#"
+[project]
+name = "p"
+version = "1"
+
+[connections.c]
+type = "s3"
+bucket = "b"
+region = "r"
+
+[targets.t]
+connection = "c"
+identifier = "x"
+
+[checks]
+drift_threshold = {t}
+"#
+        );
+        Config::from_toml(&toml)
+    }
+
+    #[test]
+    fn test_drift_threshold_valid_bounds_accepted() {
+        for t in ["0.0", "0.05", "0.25", "1.0"] {
+            assert!(
+                config_with_threshold(t).is_ok(),
+                "threshold {t} should be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn test_drift_threshold_negative_rejected() {
+        let err = config_with_threshold("-0.1").unwrap_err();
+        match err {
+            crate::SagoError::Config(msg) => assert!(msg.contains("drift_threshold")),
+            other => panic!("expected Config error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_drift_threshold_above_one_rejected() {
+        let err = config_with_threshold("100.0").unwrap_err();
+        assert!(matches!(err, crate::SagoError::Config(_)));
     }
 
     #[test]

@@ -24,10 +24,15 @@ identifier = "public.users"
 connection = "archive"
 identifier = "events/2024.parquet"
 
-# Optional per-target sample persistence for distribution drift metrics.
+# Per-target sample persistence for distribution drift metrics. Sampling is ON
+# by default (it is what `sago plan`'s PSI drift gate compares against), so this
+# block is only needed to tune the sample size or to opt a target out entirely
+# with `enabled = false`.
 [targets.events_2024.sample]
-enabled = true
 n = 1000
 
+# drift_threshold gates `sago plan` on the Population Stability Index (PSI): a
+# column whose PSI exceeds it fails the plan (non-zero exit). Must be in [0, 1];
+# rules of thumb: <0.1 no shift, 0.1–0.25 moderate, >0.25 major.
 [checks]
 drift_threshold = 0.05

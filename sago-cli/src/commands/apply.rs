@@ -36,7 +36,17 @@ pub async fn run(args: &ApplyArgs) -> Result<()> {
         let provider = build_provider(conn)
             .await
             .with_context(|| format!("failed to build provider for '{}'", name))?;
-        let sample_n = tgt.sample.as_ref().filter(|s| s.enabled).map(|s| s.n);
+        // Persist per-column samples by default so `sago plan`'s PSI drift gate
+        // has a baseline to compare against. A target opts out only with an
+        // explicit `[targets.x.sample] enabled = false`; a missing block means
+        // "sample with the default size", not "no samples" (the latter silently
+        // disabled drift detection out of the box).
+        let sample_n = tgt
+            .sample
+            .as_ref()
+            .map_or(Some(sago_core::config::DEFAULT_SAMPLE_N), |s| {
+                s.enabled.then_some(s.n)
+            });
         let snap = capture_snapshot(provider, &tgt.identifier, sample_n)
             .await
             .with_context(|| format!("failed to capture snapshot for '{}'", name))?;

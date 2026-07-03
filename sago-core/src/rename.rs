@@ -71,9 +71,12 @@ pub struct RenameOptions {
     /// When *name similarity is the only available signal* (both columns have an
     /// `Unknown` semantic type and neither exposes numeric stats), require at
     /// least this name similarity. Without corroboration, the blended confidence
-    /// degenerates to the raw name similarity, so two merely-similar names
-    /// (e.g. `created` ↔ `updated`) could otherwise clear `min_confidence` and be
-    /// declared a rename on a coincidental spelling overlap. Held to a higher bar.
+    /// degenerates to the raw name similarity, so two merely-similar names could
+    /// otherwise clear `min_confidence` and be declared a rename on a coincidental
+    /// spelling overlap. Held to a high bar: near-miss siblings like
+    /// `address_line1` ↔ `address_line2` (a single-character edit ⇒ ~0.92 name
+    /// similarity) are distinct columns, not a rename, and must be rejected; only
+    /// essentially-identical names (normalised-equal ⇒ 1.0) clear this floor.
     pub min_name_only_similarity: f64,
 }
 
@@ -82,7 +85,7 @@ impl Default for RenameOptions {
         RenameOptions {
             min_confidence: 0.6,
             require_type_match: true,
-            min_name_only_similarity: 0.85,
+            min_name_only_similarity: 0.92,
         }
     }
 }
@@ -422,6 +425,12 @@ fn null_ratio(s: &ColumnStats) -> f64 {
 /// Map two scalars to `[0, 1]`: `1.0` when equal, decaying toward `0` as they
 /// diverge relative to their own magnitude (so the measure is scale-free).
 fn relative_closeness(a: f64, b: f64) -> f64 {
+    // A NaN operand has no meaningful closeness; treat it as maximally distant
+    // rather than letting NaN propagate through the average (where it would make
+    // the whole stats-similarity score NaN and silently drop the signal).
+    if a.is_nan() || b.is_nan() {
+        return 0.0;
+    }
     let denom = a.abs().max(b.abs());
     if denom < f64::EPSILON {
         return 1.0; // both ~0
@@ -545,6 +554,13 @@ mod tests {
         assert_eq!(relative_closeness(0.0, 0.0), 1.0);
     }
 
+    #[test]
+    fn test_relative_closeness_nan_is_zero() {
+        // A NaN operand must not propagate into the similarity average.
+        assert_eq!(relative_closeness(f64::NAN, 1.0), 0.0);
+        assert_eq!(relative_closeness(1.0, f64::NAN), 0.0);
+    }
+
     // ── score_pair gating ──────────────────────────────────────────────────────
 
     #[test]
@@ -588,6 +604,20 @@ mod tests {
         assert!(
             score_pair("created", &from, "updated", &to, &opts).is_none(),
             "moderate name-only overlap must not auto-accept as a rename"
+        );
+    }
+
+    #[test]
+    fn test_score_pair_name_only_near_miss_sibling_rejected() {
+        // `address_line1` ↔ `address_line2` differ by one char (~0.92 name sim)
+        // but are distinct columns. With no semantic/stats corroboration the
+        // stricter name-only floor must reject them as a rename.
+        let from = profile("Utf8", SemanticType::Unknown, None);
+        let to = profile("Utf8", SemanticType::Unknown, None);
+        let opts = RenameOptions::default();
+        assert!(
+            score_pair("address_line1", &from, "address_line2", &to, &opts).is_none(),
+            "single-char-different sibling columns must not auto-accept as a rename"
         );
     }
 
