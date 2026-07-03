@@ -15,8 +15,15 @@ pub enum SemanticType {
     Unknown,
 }
 
-static EMAIL_REGEX: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$").unwrap());
+// Domain is one or more dot-separated labels; each label starts and ends with an
+// alphanumeric (hyphens only in the middle), which rejects the trailing-dot/dash
+// TLDs the old `[a-zA-Z0-9-.]+` suffix let through (e.g. `user@example.c-`).
+static EMAIL_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+$",
+    )
+    .unwrap()
+});
 static CREDIT_CARD_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^(?:4[0-9]{12}(?:[0-9]{3})?|5[1-5][0-9]{14}|3[47][0-9]{13}|3(?:0[0-5]|[68][0-9])[0-9]{11}|6(?:011|5[0-9]{2})[0-9]{12}|(?:2131|1800|35\d{3})\d{11})$").unwrap()
 });
@@ -31,8 +38,15 @@ static UUID_REGEX: LazyLock<Regex> = LazyLock::new(|| {
 static IP_ADDRESS_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$").unwrap()
 });
-static URL_REGEX: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^https?://[^\s/$.?#].[^\s]*$").unwrap());
+// Require a real host after the scheme: a dotted domain (label.label…), an
+// optional port, then an optional path/query. The old `[^\s/$.?#].[^\s]*`
+// accepted junk like `http://@@`.
+static URL_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"^https?://[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+(:[0-9]{1,5})?(/\S*)?$",
+    )
+    .unwrap()
+});
 
 pub fn infer_semantic_type(column_name: &str, array: &dyn Array) -> SemanticType {
     let lower_name = column_name.to_lowercase();
@@ -307,6 +321,57 @@ mod tests {
             infer_semantic_type("unknown_col", &array),
             SemanticType::Url
         );
+    }
+
+    // ── regex tightening regressions ─────────────────────────────────────────
+
+    #[test]
+    fn test_email_regex_rejects_trailing_dot_or_dash_tld() {
+        // Malformed TLDs must not classify as Email (data-based path, no name hint).
+        for bad in ["user@example.c-", "user@example.c.", "user@-example.com"] {
+            let array = StringArray::from(vec![bad, bad, bad, bad, bad]);
+            assert_eq!(
+                infer_semantic_type("col", &array),
+                SemanticType::Unknown,
+                "{bad} must not be classified Email",
+            );
+        }
+    }
+
+    #[test]
+    fn test_email_regex_still_accepts_valid() {
+        let array = StringArray::from(vec![
+            "a@example.com",
+            "b.c+tag@sub.domain.co.uk",
+            "d_e@example.io",
+            "f@example.com",
+            "g@example.com",
+        ]);
+        assert_eq!(infer_semantic_type("col", &array), SemanticType::Email);
+    }
+
+    #[test]
+    fn test_url_regex_rejects_hostless_junk() {
+        for bad in ["http://@@", "https://", "http:// spaced.com"] {
+            let array = StringArray::from(vec![bad, bad, bad, bad, bad]);
+            assert_eq!(
+                infer_semantic_type("col", &array),
+                SemanticType::Unknown,
+                "{bad} must not be classified Url",
+            );
+        }
+    }
+
+    #[test]
+    fn test_url_regex_still_accepts_valid() {
+        let array = StringArray::from(vec![
+            "https://example.com",
+            "http://foo.org/path?q=1",
+            "https://bar.io",
+            "https://baz.net:8080/page",
+            "http://qux.com",
+        ]);
+        assert_eq!(infer_semantic_type("col", &array), SemanticType::Url);
     }
 
     // ── threshold boundary behaviour ─────────────────────────────────────────

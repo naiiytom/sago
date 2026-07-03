@@ -1,13 +1,136 @@
 use crate::{DataProvider, Result, SagoError, SchemaProvider};
 use arrow::array::{
-    ArrayBuilder, BooleanBuilder, Float32Builder, Float64Builder, Int16Builder, Int32Builder,
-    Int64Builder, StringBuilder,
+    ArrayRef, BinaryBuilder, BooleanBuilder, Date32Builder, Float32Builder, Float64Builder,
+    Int16Builder, Int32Builder, Int64Builder, StringBuilder, TimestampNanosecondArray,
 };
-use arrow::datatypes::{DataType, Field, Schema};
+use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use arrow::record_batch::RecordBatch;
 use async_trait::async_trait;
+use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
+use sqlx::postgres::PgRow;
 use sqlx::{Pool, Postgres, Row};
 use std::sync::Arc;
+
+/// Days between the Unix epoch and `d`, the encoding Arrow's `Date32` uses.
+fn date_to_days(d: NaiveDate) -> i32 {
+    // `from_ymd_opt(1970, 1, 1)` is always valid; the panic is unreachable.
+    let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).expect("epoch date is valid");
+    (d - epoch).num_days() as i32
+}
+
+/// Nanoseconds since the Unix epoch for a timezone-naive timestamp, interpreting
+/// it as UTC (Postgres `timestamp without time zone` carries no offset). Returns
+/// `None` only for timestamps outside the ~584-year range representable in i64ns.
+fn naive_datetime_to_nanos(dt: NaiveDateTime) -> Option<i64> {
+    dt.and_utc().timestamp_nanos_opt()
+}
+
+/// Best-effort `f64` for a column that Sago maps to `Float64`. Postgres
+/// `double precision` decodes directly; `numeric`/`decimal` cannot be read as
+/// `f64` by sqlx, so fall back to decoding the arbitrary-precision value and
+/// narrowing it (lossy, but the column is already declared `Float64`).
+fn pg_f64(row: &PgRow, name: &str) -> Option<f64> {
+    if let Ok(v) = row.try_get::<Option<f64>, _>(name) {
+        return v;
+    }
+    row.try_get::<Option<sqlx::types::BigDecimal>, _>(name)
+        .ok()
+        .flatten()
+        .and_then(|d| d.to_string().parse::<f64>().ok())
+}
+
+/// A NULL, or a decode error, both surface as `None` for column `name`.
+fn opt<T>(row: &PgRow, name: &str) -> Option<T>
+where
+    T: for<'r> sqlx::Decode<'r, Postgres> + sqlx::Type<Postgres>,
+{
+    row.try_get::<Option<T>, _>(name).ok().flatten()
+}
+
+/// Materialize one Arrow column for `field` from every row, honouring the exact
+/// Arrow type Sago declared for it (including timestamp timezone metadata) so the
+/// resulting array always matches the schema `RecordBatch::try_new` validates against.
+fn build_column(rows: &[PgRow], field: &Field) -> ArrayRef {
+    let name = field.name().as_str();
+    match field.data_type() {
+        DataType::Boolean => {
+            let mut b = BooleanBuilder::with_capacity(rows.len());
+            for row in rows {
+                b.append_option(opt::<bool>(row, name));
+            }
+            Arc::new(b.finish())
+        }
+        DataType::Int16 => {
+            let mut b = Int16Builder::with_capacity(rows.len());
+            for row in rows {
+                b.append_option(opt::<i16>(row, name));
+            }
+            Arc::new(b.finish())
+        }
+        DataType::Int32 => {
+            let mut b = Int32Builder::with_capacity(rows.len());
+            for row in rows {
+                b.append_option(opt::<i32>(row, name));
+            }
+            Arc::new(b.finish())
+        }
+        DataType::Int64 => {
+            let mut b = Int64Builder::with_capacity(rows.len());
+            for row in rows {
+                b.append_option(opt::<i64>(row, name));
+            }
+            Arc::new(b.finish())
+        }
+        DataType::Float32 => {
+            let mut b = Float32Builder::with_capacity(rows.len());
+            for row in rows {
+                b.append_option(opt::<f32>(row, name));
+            }
+            Arc::new(b.finish())
+        }
+        DataType::Float64 => {
+            let mut b = Float64Builder::with_capacity(rows.len());
+            for row in rows {
+                b.append_option(pg_f64(row, name));
+            }
+            Arc::new(b.finish())
+        }
+        DataType::Date32 => {
+            let mut b = Date32Builder::with_capacity(rows.len());
+            for row in rows {
+                b.append_option(opt::<NaiveDate>(row, name).map(date_to_days));
+            }
+            Arc::new(b.finish())
+        }
+        DataType::Timestamp(TimeUnit::Nanosecond, tz) => {
+            let mut vals: Vec<Option<i64>> = Vec::with_capacity(rows.len());
+            for row in rows {
+                let nanos = if tz.is_some() {
+                    opt::<DateTime<Utc>>(row, name).and_then(|d| d.timestamp_nanos_opt())
+                } else {
+                    opt::<NaiveDateTime>(row, name).and_then(naive_datetime_to_nanos)
+                };
+                vals.push(nanos);
+            }
+            Arc::new(TimestampNanosecondArray::from(vals).with_timezone_opt(tz.clone()))
+        }
+        DataType::Binary => {
+            let mut b = BinaryBuilder::new();
+            for row in rows {
+                b.append_option(opt::<Vec<u8>>(row, name));
+            }
+            Arc::new(b.finish())
+        }
+        // Utf8 and anything Sago fell back to Utf8 for: read as text.
+        _ => {
+            let mut b = StringBuilder::new();
+            for row in rows {
+                b.append_option(opt::<String>(row, name));
+            }
+            Arc::new(b.finish())
+        }
+    }
+}
 
 pub struct PostgresSchemaProvider {
     pool: Pool<Postgres>,
@@ -130,95 +253,15 @@ impl DataProvider for PostgresSchemaProvider {
             return Ok(vec![]);
         }
 
-        let mut builders: Vec<Box<dyn ArrayBuilder>> = Vec::new();
-        for field in schema.fields() {
-            let builder: Box<dyn ArrayBuilder> = match field.data_type() {
-                DataType::Boolean => Box::new(BooleanBuilder::new()),
-                DataType::Int16 => Box::new(Int16Builder::new()),
-                DataType::Int32 => Box::new(Int32Builder::new()),
-                DataType::Int64 => Box::new(Int64Builder::new()),
-                DataType::Float32 => Box::new(Float32Builder::new()),
-                DataType::Float64 => Box::new(Float64Builder::new()),
-                DataType::Utf8 => Box::new(StringBuilder::new()),
-                _ => Box::new(StringBuilder::new()), // Fallback
-            };
-            builders.push(builder);
-        }
-
-        for row in rows {
-            for (i, field) in schema.fields().iter().enumerate() {
-                let col_name = field.name();
-                match field.data_type() {
-                    DataType::Boolean => {
-                        let val: Option<bool> = row.try_get(col_name.as_str()).ok();
-                        builders[i]
-                            .as_any_mut()
-                            .downcast_mut::<BooleanBuilder>()
-                            .unwrap()
-                            .append_option(val);
-                    }
-                    DataType::Int16 => {
-                        let val: Option<i16> = row.try_get(col_name.as_str()).ok();
-                        builders[i]
-                            .as_any_mut()
-                            .downcast_mut::<Int16Builder>()
-                            .unwrap()
-                            .append_option(val);
-                    }
-                    DataType::Int32 => {
-                        let val: Option<i32> = row.try_get(col_name.as_str()).ok();
-                        builders[i]
-                            .as_any_mut()
-                            .downcast_mut::<Int32Builder>()
-                            .unwrap()
-                            .append_option(val);
-                    }
-                    DataType::Int64 => {
-                        let val: Option<i64> = row.try_get(col_name.as_str()).ok();
-                        builders[i]
-                            .as_any_mut()
-                            .downcast_mut::<Int64Builder>()
-                            .unwrap()
-                            .append_option(val);
-                    }
-                    DataType::Float32 => {
-                        let val: Option<f32> = row.try_get(col_name.as_str()).ok();
-                        builders[i]
-                            .as_any_mut()
-                            .downcast_mut::<Float32Builder>()
-                            .unwrap()
-                            .append_option(val);
-                    }
-                    DataType::Float64 => {
-                        let val: Option<f64> = row.try_get(col_name.as_str()).ok();
-                        builders[i]
-                            .as_any_mut()
-                            .downcast_mut::<Float64Builder>()
-                            .unwrap()
-                            .append_option(val);
-                    }
-                    DataType::Utf8 => {
-                        let val: Option<String> = row.try_get(col_name.as_str()).ok();
-                        builders[i]
-                            .as_any_mut()
-                            .downcast_mut::<StringBuilder>()
-                            .unwrap()
-                            .append_option(val);
-                    }
-                    _ => {
-                        // For fallback, try to get as string
-                        let val: Option<String> = row.try_get::<String, _>(col_name.as_str()).ok();
-                        builders[i]
-                            .as_any_mut()
-                            .downcast_mut::<StringBuilder>()
-                            .unwrap()
-                            .append_option(val);
-                    }
-                }
-            }
-        }
-
-        let columns = builders.into_iter().map(|mut b| b.finish()).collect();
+        // Build each column in one pass so we can honour the full Arrow type Sago
+        // declared — including Date32, Timestamp (with timezone metadata) and
+        // Binary, which the old row-at-a-time StringBuilder fallback silently
+        // dropped to all-null.
+        let columns: Vec<ArrayRef> = schema
+            .fields()
+            .iter()
+            .map(|field| build_column(&rows, field))
+            .collect();
         let batch = RecordBatch::try_new(Arc::new(schema), columns)?;
 
         Ok(vec![batch])
@@ -471,5 +514,48 @@ mod tests {
             PostgresSchemaProvider::map_postgres_type("some_custom_type"),
             DataType::Utf8
         );
+    }
+
+    // ── date / timestamp encoding helpers ────────────────────────────────────
+
+    #[test]
+    fn test_date_to_days_epoch_is_zero() {
+        let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
+        assert_eq!(date_to_days(epoch), 0);
+    }
+
+    #[test]
+    fn test_date_to_days_after_and_before_epoch() {
+        assert_eq!(
+            date_to_days(NaiveDate::from_ymd_opt(1970, 1, 2).unwrap()),
+            1
+        );
+        assert_eq!(
+            date_to_days(NaiveDate::from_ymd_opt(1969, 12, 31).unwrap()),
+            -1
+        );
+        // 2000-01-01 is 30 years (with 7 leap days) after the epoch = 10957 days.
+        assert_eq!(
+            date_to_days(NaiveDate::from_ymd_opt(2000, 1, 1).unwrap()),
+            10957
+        );
+    }
+
+    #[test]
+    fn test_naive_datetime_to_nanos_epoch_is_zero() {
+        let dt = NaiveDate::from_ymd_opt(1970, 1, 1)
+            .unwrap()
+            .and_hms_opt(0, 0, 0)
+            .unwrap();
+        assert_eq!(naive_datetime_to_nanos(dt), Some(0));
+    }
+
+    #[test]
+    fn test_naive_datetime_to_nanos_one_second() {
+        let dt = NaiveDate::from_ymd_opt(1970, 1, 1)
+            .unwrap()
+            .and_hms_opt(0, 0, 1)
+            .unwrap();
+        assert_eq!(naive_datetime_to_nanos(dt), Some(1_000_000_000));
     }
 }

@@ -16,9 +16,10 @@ use std::process::ExitCode;
 use crate::report::{default_artifact_path, print_terminal, write_artifact};
 
 /// Number of numeric values to retain per column when sampling the live dataset
-/// for the PSI drift metric. Matches the config default; large enough for a
-/// stable 10-bin PSI without materializing the whole column.
-const PLAN_SAMPLE_N: usize = 1000;
+/// for the PSI drift metric. Shares the config default so live and baseline
+/// sample sizes match; large enough for a stable 10-bin PSI without
+/// materializing the whole column.
+const PLAN_SAMPLE_N: usize = sago_core::config::DEFAULT_SAMPLE_N;
 
 #[derive(Args, Debug)]
 pub struct PlanArgs {
