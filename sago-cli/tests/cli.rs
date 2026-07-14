@@ -6,7 +6,7 @@ fn test_help_lists_all_four_commands() {
     let mut cmd = Command::cargo_bin("sago").unwrap();
     let out = cmd.arg("--help").assert().success();
     let stdout = String::from_utf8_lossy(&out.get_output().stdout).to_string();
-    for word in ["init", "apply", "plan", "diff", "federate"] {
+    for word in ["init", "apply", "plan", "diff", "federate", "domains"] {
         assert!(
             stdout.contains(word),
             "help text missing '{}': {}",
@@ -478,7 +478,7 @@ fn test_full_init_then_help_subcommands() {
         .success();
 
     // each subcommand --help still works inside an initialized project
-    for sub in ["apply", "plan", "diff", "federate"] {
+    for sub in ["apply", "plan", "diff", "federate", "domains"] {
         Command::cargo_bin("sago")
             .unwrap()
             .arg(sub)
@@ -527,4 +527,148 @@ fn test_explore_fails_without_sago_toml() {
         .assert()
         .failure()
         .stderr(predicates::str::contains("Sago.toml"));
+}
+
+// ── sago domains ─────────────────────────────────────────────────────────────
+
+const MESH_TOML: &str = r#"
+[project]
+name = "mesh"
+version = "0.1.0"
+
+[connections.archive]
+type = "s3"
+bucket = "my-data"
+region = "us-east-1"
+
+[targets.orders]
+connection = "archive"
+identifier = "orders.parquet"
+domain = "sales"
+
+[targets.misc]
+connection = "archive"
+identifier = "misc.parquet"
+
+[domains.sales]
+operators = ["alice"]
+endpoint = "http://sales.internal:50051"
+
+[checks]
+drift_threshold = 0.05
+"#;
+
+#[test]
+fn test_domains_lists_known_domains_with_endpoint() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("Sago.toml"), MESH_TOML).unwrap();
+    Command::cargo_bin("sago")
+        .unwrap()
+        .arg("domains")
+        .current_dir(tmp.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("sales"))
+        .stdout(predicate::str::contains("http://sales.internal:50051"));
+}
+
+#[test]
+fn test_domains_excludes_unassigned_targets() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("Sago.toml"), MESH_TOML).unwrap();
+    let out = Command::cargo_bin("sago")
+        .unwrap()
+        .arg("domains")
+        .current_dir(tmp.path())
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&out.get_output().stdout).to_string();
+    assert!(
+        !stdout.contains("misc"),
+        "unassigned target 'misc' should not appear as a domain: {stdout}"
+    );
+}
+
+#[test]
+fn test_domains_no_domains_configured_reports_empty() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("Sago.toml"), SAMPLE_TOML).unwrap();
+    Command::cargo_bin("sago")
+        .unwrap()
+        .arg("domains")
+        .current_dir(tmp.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("no domains known"));
+}
+
+#[test]
+fn test_domains_resolve_known_domain_prints_endpoint() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("Sago.toml"), MESH_TOML).unwrap();
+    Command::cargo_bin("sago")
+        .unwrap()
+        .args(["domains", "--resolve", "sales"])
+        .current_dir(tmp.path())
+        .assert()
+        .success()
+        .stdout("http://sales.internal:50051\n");
+}
+
+#[test]
+fn test_domains_resolve_unknown_domain_fails() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("Sago.toml"), MESH_TOML).unwrap();
+    Command::cargo_bin("sago")
+        .unwrap()
+        .args(["domains", "--resolve", "no-such-domain"])
+        .current_dir(tmp.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unknown domain"));
+}
+
+#[test]
+fn test_domains_resolve_domain_without_endpoint_fails() {
+    let tmp = tempfile::tempdir().unwrap();
+    // "misc" has no domain, "sales" has a domain but this config gives it no
+    // endpoint — a target with an unregistered domain should also error.
+    let toml = r#"
+[project]
+name = "mesh"
+version = "0.1.0"
+
+[connections.archive]
+type = "s3"
+bucket = "my-data"
+region = "us-east-1"
+
+[targets.orders]
+connection = "archive"
+identifier = "orders.parquet"
+domain = "sales"
+
+[checks]
+drift_threshold = 0.05
+"#;
+    std::fs::write(tmp.path().join("Sago.toml"), toml).unwrap();
+    Command::cargo_bin("sago")
+        .unwrap()
+        .args(["domains", "--resolve", "sales"])
+        .current_dir(tmp.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no registered endpoint"));
+}
+
+#[test]
+fn test_domains_fails_without_sago_toml() {
+    let tmp = tempfile::tempdir().unwrap();
+    Command::cargo_bin("sago")
+        .unwrap()
+        .arg("domains")
+        .current_dir(tmp.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Sago.toml not found"));
 }

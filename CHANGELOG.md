@@ -40,6 +40,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`sago domains`**: a new subcommand plus `sago-core::registry` that lists
+  every data-mesh domain a project knows about — the union of `[domains]`
+  entries and every target's `domain =` reference — with its registered
+  `SagoService` endpoint (`[domains.<name>].endpoint`, new on `DomainConfig`),
+  operator count, and target count. `sago domains --resolve <name>` prints
+  just the endpoint for scripting, erroring distinctly for "unknown domain"
+  vs. "known domain, no endpoint configured". This is Sago's domain-discovery
+  mechanism: a config-declared registry (the `[domains]` table itself,
+  distributed however the team already manages `Sago.toml`) rather than a
+  live gossip/announce protocol. Fourth and final concrete deliverable from
+  the Decentralized Data Architectures follow-ups in `docs/DECENTRALIZED.md`.
 - **Per-domain RBAC on `apply`**: a new `[domains.<name>]` table in
   `Sago.toml` declares an `operators` allowlist (`sago-core::rbac`) for a
   data-mesh `domain`. A domain absent from the table is unrestricted, so

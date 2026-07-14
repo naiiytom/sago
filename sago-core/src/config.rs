@@ -68,8 +68,10 @@ pub struct TargetConfig {
     pub owner: Option<String>,
 }
 
-/// Governance for a data-mesh `domain`: who may run `sago apply` against the
-/// targets tagged with it. See `sago-core::rbac`.
+/// Governance and discovery metadata for a data-mesh `domain`: who may run
+/// `sago apply` against the targets tagged with it, and where to reach the
+/// `SagoService` node that domain's team operates. See `sago-core::rbac` and
+/// `sago-core::registry`.
 #[derive(Debug, Deserialize, Default)]
 pub struct DomainConfig {
     /// Identities allowed to `apply` targets in this domain. Empty means the
@@ -79,6 +81,14 @@ pub struct DomainConfig {
     /// by the CLI (`--as` or `SAGO_ACTOR`).
     #[serde(default)]
     pub operators: Vec<String>,
+    /// The `SagoService` gRPC endpoint (e.g. `http://sales.internal:50051`)
+    /// that this domain's team operates, for reconciliation via
+    /// `sago_sdk::grpc::reconcile`. Optional — a domain can exist purely for
+    /// RBAC/grouping without exposing a node. This is Sago's discovery
+    /// mechanism: the registry of domains and their endpoints is the config
+    /// file itself, not a live announce protocol.
+    #[serde(default)]
+    pub endpoint: Option<String>,
 }
 
 /// Default number of numeric values retained per column when sampling.
@@ -310,6 +320,55 @@ drift_threshold = 0.05
 "#;
         let cfg = Config::from_toml(toml).unwrap();
         assert!(cfg.domains.get("sales").unwrap().operators.is_empty());
+    }
+
+    #[test]
+    fn test_domain_endpoint_parsed() {
+        let toml = r#"
+[project]
+name = "mesh"
+version = "1"
+
+[connections.c]
+type = "s3"
+bucket = "b"
+region = "r"
+
+[domains.sales]
+endpoint = "http://sales.internal:50051"
+
+[checks]
+drift_threshold = 0.05
+"#;
+        let cfg = Config::from_toml(toml).unwrap();
+        assert_eq!(
+            cfg.domains.get("sales").unwrap().endpoint.as_deref(),
+            Some("http://sales.internal:50051")
+        );
+    }
+
+    #[test]
+    fn test_domain_endpoint_defaults_none() {
+        let cfg = Config::from_toml(
+            r#"
+[project]
+name = "mesh"
+version = "1"
+
+[connections.c]
+type = "s3"
+bucket = "b"
+region = "r"
+
+[domains.sales]
+operators = ["alice"]
+
+[checks]
+drift_threshold = 0.05
+"#,
+        )
+        .unwrap();
+        assert!(cfg.domains.get("sales").unwrap().endpoint.is_none());
     }
 
     #[test]
