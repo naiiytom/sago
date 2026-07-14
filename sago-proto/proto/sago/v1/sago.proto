@@ -119,8 +119,45 @@ message DiffResponse {
   DiffReport report = 1;
 }
 
-// A remote data-reliability provider: fetch schemas and compute diffs over gRPC.
+// ── Merkle sync ──────────────────────────────────────────────────────────────
+//
+// Lets a client reconcile its own copy of a dataset against this node's
+// without shipping the dataset itself: compare roots, and where they differ,
+// walk inclusion proofs to find the specific divergent rows. See
+// sago-core::merkle and docs/DECENTRALIZED.md.
+
+message GetMerkleRootRequest {
+  string identifier = 1;
+}
+
+message GetMerkleRootResponse {
+  // Hex-encoded SHA-256 root (sago_core::merkle::MerkleTree::root_hex).
+  string root_hex = 1;
+  uint64 leaf_count = 2;
+}
+
+message GetInclusionProofRequest {
+  string identifier = 1;
+  uint64 leaf_index = 2;
+}
+
+// One step of an inclusion proof: a sibling hash and which side it sits on.
+message ProofStep {
+  string sibling_hex = 1;
+  bool sibling_is_left = 2;
+}
+
+message GetInclusionProofResponse {
+  // Hex-encoded hash of the leaf at `leaf_index`.
+  string leaf_hex = 1;
+  repeated ProofStep steps = 2;
+}
+
+// A remote data-reliability provider: fetch schemas, compute diffs, and
+// reconcile via Merkle commitments over gRPC.
 service SagoService {
   rpc GetSchema(GetSchemaRequest) returns (GetSchemaResponse);
   rpc Diff(DiffRequest) returns (DiffResponse);
+  rpc GetMerkleRoot(GetMerkleRootRequest) returns (GetMerkleRootResponse);
+  rpc GetInclusionProof(GetInclusionProofRequest) returns (GetInclusionProofResponse);
 }

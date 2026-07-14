@@ -18,8 +18,21 @@
 //! nodes the last node is promoted unchanged to the next level (a duplication-
 //! free convention that keeps proofs unambiguous).
 
+use std::fmt::Write as _;
+
+use arrow::record_batch::RecordBatch;
+use arrow::util::display::ArrayFormatter;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+
+use crate::Result;
+
+/// Separates canonically-formatted column values within a row before hashing.
+/// The Unicode "unit separator" control character is vanishingly unlikely to
+/// appear in real column data, so two differently-shaped rows do not collide
+/// onto the same leaf bytes just because a value happens to contain a comma or
+/// pipe.
+const FIELD_SEP: char = '\u{1f}';
 
 /// A 32-byte SHA-256 digest.
 pub type Hash = [u8; 32];
@@ -125,6 +138,41 @@ impl MerkleTree {
         Self::from_leaves(leaves)
     }
 
+    /// Build a tree over the rows of `batches`, in order, one leaf per row.
+    ///
+    /// Each row is canonically serialized as its column values (in schema
+    /// order) rendered via Arrow's display formatting and joined with a
+    /// control-character separator — the same value a person would see in
+    /// `sago explore`, not a type-specific byte encoding. This means the
+    /// commitment is over *displayed* values: two datasets that print
+    /// identically hash identically, even if the underlying column types
+    /// differ (e.g. `Int32` vs `Int64`), matching how the rest of Sago treats
+    /// value-level equality. Row order matters — reordering a dataset changes
+    /// the root — since a data-mesh consumer needs to know if rows were
+    /// reshuffled, not only whether the row *set* changed.
+    pub fn from_batches(batches: &[RecordBatch]) -> Result<Self> {
+        let opts = arrow::util::display::FormatOptions::default();
+        let mut leaves = Vec::new();
+        for batch in batches {
+            let formatters: Vec<ArrayFormatter<'_>> = batch
+                .columns()
+                .iter()
+                .map(|col| ArrayFormatter::try_new(col.as_ref(), &opts))
+                .collect::<std::result::Result<_, _>>()?;
+            for row in 0..batch.num_rows() {
+                let mut buf = String::new();
+                for (i, f) in formatters.iter().enumerate() {
+                    if i > 0 {
+                        buf.push(FIELD_SEP);
+                    }
+                    write!(buf, "{}", f.value(row)).expect("String write is infallible");
+                }
+                leaves.push(hash_leaf(buf.as_bytes()));
+            }
+        }
+        Ok(Self::from_leaves(leaves))
+    }
+
     /// The number of leaves committed by this tree.
     pub fn leaf_count(&self) -> usize {
         // The empty tree stores a single synthetic root and no real leaves.
@@ -147,6 +195,16 @@ impl MerkleTree {
     /// Hex-encoded [`root`](Self::root).
     pub fn root_hex(&self) -> String {
         to_hex(&self.root())
+    }
+
+    /// The leaf hash at `index`, or `None` if out of range. Mirrors the same
+    /// bound as [`proof`](Self::proof) so a caller can pair a leaf with its
+    /// inclusion proof.
+    pub fn leaf(&self, index: usize) -> Option<Hash> {
+        if index >= self.leaf_count() {
+            return None;
+        }
+        self.levels[0].get(index).copied()
     }
 
     /// Produce an inclusion proof for the leaf at `index`, or `None` if out of
@@ -205,7 +263,7 @@ pub fn verify_proof(root: &Hash, leaf: &Hash, proof: &InclusionProof) -> bool {
 }
 
 /// Parse a 64-char lowercase/uppercase hex string into a [`Hash`].
-fn from_hex(s: &str) -> Option<Hash> {
+pub fn from_hex(s: &str) -> Option<Hash> {
     if s.len() != 64 {
         return None;
     }
@@ -368,5 +426,107 @@ mod tests {
         let mut proof = tree.proof(0).unwrap();
         proof.steps[0].sibling = "not-hex".into();
         assert!(!verify_proof(&tree.root(), &hash_leaf(b"a"), &proof));
+    }
+
+    // ── leaf() ───────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_leaf_returns_hash_at_index() {
+        let tree = MerkleTree::from_records([b"a".as_ref(), b"b", b"c"]);
+        assert_eq!(tree.leaf(0), Some(hash_leaf(b"a")));
+        assert_eq!(tree.leaf(2), Some(hash_leaf(b"c")));
+    }
+
+    #[test]
+    fn test_leaf_out_of_range_is_none() {
+        let tree = MerkleTree::from_records([b"a".as_ref(), b"b"]);
+        assert!(tree.leaf(2).is_none());
+    }
+
+    #[test]
+    fn test_leaf_empty_tree_is_none() {
+        let tree = MerkleTree::from_records(Vec::<Vec<u8>>::new());
+        assert!(tree.leaf(0).is_none());
+    }
+
+    // ── from_batches() ───────────────────────────────────────────────────────
+
+    fn batch(schema: std::sync::Arc<arrow::datatypes::Schema>, ids: Vec<i32>) -> RecordBatch {
+        use arrow::array::Int32Array;
+        RecordBatch::try_new(schema, vec![std::sync::Arc::new(Int32Array::from(ids))]).unwrap()
+    }
+
+    fn int32_schema() -> std::sync::Arc<arrow::datatypes::Schema> {
+        use arrow::datatypes::{DataType, Field, Schema};
+        std::sync::Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, true)]))
+    }
+
+    #[test]
+    fn test_from_batches_leaf_count_matches_row_count() {
+        let schema = int32_schema();
+        let b = batch(schema, vec![1, 2, 3]);
+        let tree = MerkleTree::from_batches(&[b]).unwrap();
+        assert_eq!(tree.leaf_count(), 3);
+    }
+
+    #[test]
+    fn test_from_batches_empty_is_empty_tree() {
+        let tree = MerkleTree::from_batches(&[]).unwrap();
+        assert_eq!(tree.leaf_count(), 0);
+        assert_eq!(tree.root(), empty_root());
+    }
+
+    #[test]
+    fn test_from_batches_deterministic() {
+        let schema = int32_schema();
+        let a = MerkleTree::from_batches(&[batch(schema.clone(), vec![1, 2, 3])]).unwrap();
+        let b = MerkleTree::from_batches(&[batch(schema, vec![1, 2, 3])]).unwrap();
+        assert_eq!(a.root(), b.root());
+    }
+
+    #[test]
+    fn test_from_batches_row_order_sensitive() {
+        let schema = int32_schema();
+        let a = MerkleTree::from_batches(&[batch(schema.clone(), vec![1, 2, 3])]).unwrap();
+        let b = MerkleTree::from_batches(&[batch(schema, vec![3, 2, 1])]).unwrap();
+        assert_ne!(a.root(), b.root());
+    }
+
+    #[test]
+    fn test_from_batches_multiple_batches_concatenate_in_order() {
+        let schema = int32_schema();
+        let single = MerkleTree::from_batches(&[batch(schema.clone(), vec![1, 2, 3, 4])]).unwrap();
+        let split = MerkleTree::from_batches(&[
+            batch(schema.clone(), vec![1, 2]),
+            batch(schema, vec![3, 4]),
+        ])
+        .unwrap();
+        assert_eq!(single.root(), split.root());
+    }
+
+    #[test]
+    fn test_from_batches_differing_value_changes_root() {
+        let schema = int32_schema();
+        let a = MerkleTree::from_batches(&[batch(schema.clone(), vec![1, 2, 3])]).unwrap();
+        let b = MerkleTree::from_batches(&[batch(schema, vec![1, 2, 99])]).unwrap();
+        assert_ne!(a.root(), b.root());
+    }
+
+    #[test]
+    fn test_from_batches_null_and_value_produce_different_leaves() {
+        let schema = int32_schema();
+        let b = batch(schema, vec![1]);
+        let null_batch = {
+            use arrow::array::Int32Array;
+            let schema = int32_schema();
+            RecordBatch::try_new(
+                schema,
+                vec![std::sync::Arc::new(Int32Array::from(vec![None::<i32>]))],
+            )
+            .unwrap()
+        };
+        let with_value = MerkleTree::from_batches(&[b]).unwrap();
+        let with_null = MerkleTree::from_batches(&[null_batch]).unwrap();
+        assert_ne!(with_value.root(), with_null.root());
     }
 }

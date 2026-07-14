@@ -40,6 +40,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Merkle-based reconciliation over gRPC**: `SagoService` gained
+  `GetMerkleRoot`/`GetInclusionProof` RPCs, served by `ProviderService` via a
+  new `MerkleTree::from_batches` (`sago-core::merkle`) that commits to a
+  dataset's rows in order, canonically serialized the same way `sago explore`
+  displays them. `sago_sdk::grpc::reconcile` is the client-side counterpart:
+  given a Merkle tree built from a caller's own copy of a dataset, it fetches
+  the remote root and, when it differs, walks per-row inclusion proofs to
+  report exactly which local rows diverge from the remote node's — one round
+  trip when in sync, otherwise one `GetInclusionProof` call per row in the
+  shorter side. This is the second concrete deliverable from the Decentralized
+  Data Architectures follow-ups in `docs/DECENTRALIZED.md`.
 - **`sago federate`**: a new subcommand that runs the same baseline-vs-live
   drift computation as `sago plan`, but groups the report by each target's
   `domain` (data-mesh metadata already on `TargetConfig`) instead of a flat

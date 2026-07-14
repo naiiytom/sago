@@ -35,6 +35,6 @@
 - [~] **Decentralized Data Architectures** *(foundation only — primitives shipped, features deferred)*: This is a direction rather than a single feature. The enabling **primitives** now exist — Merkle commitments for trust-minimised sync, three-way merge for federated schema governance, the `SagoService` gRPC *interface definition*, and per-target `domain`/`owner` metadata in config. The consumer-facing pieces are **not yet built** and are tracked as concrete follow-ups in [DECENTRALIZED.md](./DECENTRALIZED.md):
   - [x] `sago federate` view grouping `plan` output by `domain`.
   - [x] A reference `SagoService` **server** (`sago-sdk::grpc`, `grpc` feature) and the generated client.
-  - [ ] A higher-level client wrapper that reconciles divergence via Merkle inclusion proofs.
+  - [x] A higher-level client wrapper (`sago_sdk::grpc::reconcile`) that reconciles divergence via Merkle inclusion proofs.
   - [ ] Per-domain ownership / RBAC enforcement.
   - [ ] Domain discovery (gossip/registry).

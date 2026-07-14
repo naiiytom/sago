@@ -9,9 +9,12 @@ use arrow::array::{Int32Array, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use async_trait::async_trait;
+use sago_core::merkle::MerkleTree;
 use sago_core::{DataProvider, Result, SagoError, SchemaProvider};
 use sago_proto::v1;
-use sago_sdk::grpc::{ProviderService, SagoServiceClient, SagoServiceServer};
+use sago_sdk::grpc::{
+    ProviderService, Reconciliation, SagoServiceClient, SagoServiceServer, reconcile,
+};
 
 /// A provider whose data depends on the identifier, so a Diff has something to
 /// compare: "left" is an email column, "right" renames it and adds a row.
@@ -135,5 +138,90 @@ async fn test_get_schema_unknown_identifier_is_not_found() {
         .await
         .unwrap_err();
 
+    assert_eq!(status.code(), tonic::Code::NotFound);
+}
+
+// ── reconcile() ──────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_reconcile_identical_local_copy_is_in_sync() {
+    let endpoint = spawn_server().await;
+    let mut client = SagoServiceClient::connect(endpoint).await.unwrap();
+
+    // "left" server-side is exactly this batch (see MockProvider::get_data).
+    let local =
+        MerkleTree::from_batches(&[batch("email", &["a@x.com", "b@x.com", "c@x.com"])]).unwrap();
+
+    let outcome = reconcile(&mut client, "left", &local).await.unwrap();
+    assert_eq!(outcome, Reconciliation::InSync);
+}
+
+#[tokio::test]
+async fn test_reconcile_detects_single_divergent_row() {
+    let endpoint = spawn_server().await;
+    let mut client = SagoServiceClient::connect(endpoint).await.unwrap();
+
+    // Row 1 ("b@x.com") differs from the server's copy; rows 0 and 2 match.
+    let local =
+        MerkleTree::from_batches(&[batch("email", &["a@x.com", "TAMPERED@x.com", "c@x.com"])])
+            .unwrap();
+
+    let outcome = reconcile(&mut client, "left", &local).await.unwrap();
+    match outcome {
+        Reconciliation::Diverged { divergent_rows } => {
+            assert_eq!(divergent_rows, vec![1]);
+        }
+        other => panic!("expected Diverged, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_reconcile_detects_multiple_divergent_rows() {
+    let endpoint = spawn_server().await;
+    let mut client = SagoServiceClient::connect(endpoint).await.unwrap();
+
+    let local = MerkleTree::from_batches(&[batch(
+        "email",
+        &["TAMPERED-0@x.com", "b@x.com", "TAMPERED-2@x.com"],
+    )])
+    .unwrap();
+
+    let outcome = reconcile(&mut client, "left", &local).await.unwrap();
+    match outcome {
+        Reconciliation::Diverged { divergent_rows } => {
+            assert_eq!(divergent_rows, vec![0, 2]);
+        }
+        other => panic!("expected Diverged, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_reconcile_shorter_local_side_checks_common_prefix_only() {
+    let endpoint = spawn_server().await;
+    let mut client = SagoServiceClient::connect(endpoint).await.unwrap();
+
+    // Server has 3 rows; local only has the first 2, which both match.
+    let local = MerkleTree::from_batches(&[batch("email", &["a@x.com", "b@x.com"])]).unwrap();
+
+    let outcome = reconcile(&mut client, "left", &local).await.unwrap();
+    match outcome {
+        // Roots still differ (different leaf counts), but the two rows that
+        // exist on both sides are identical, so neither is flagged.
+        Reconciliation::Diverged { divergent_rows } => {
+            assert!(divergent_rows.is_empty());
+        }
+        other => panic!("expected Diverged (root differs due to length), got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_reconcile_unknown_identifier_propagates_status() {
+    let endpoint = spawn_server().await;
+    let mut client = SagoServiceClient::connect(endpoint).await.unwrap();
+
+    let local = MerkleTree::from_batches(&[]).unwrap();
+    let status = reconcile(&mut client, "does_not_exist", &local)
+        .await
+        .unwrap_err();
     assert_eq!(status.code(), tonic::Code::NotFound);
 }
