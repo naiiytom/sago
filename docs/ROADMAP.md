@@ -36,5 +36,5 @@
   - [x] `sago federate` view grouping `plan` output by `domain`.
   - [x] A reference `SagoService` **server** (`sago-sdk::grpc`, `grpc` feature) and the generated client.
   - [x] A higher-level client wrapper (`sago_sdk::grpc::reconcile`) that reconciles divergence via Merkle inclusion proofs.
-  - [ ] Per-domain ownership / RBAC enforcement.
+  - [x] Per-domain ownership / RBAC enforcement (`sago-core::rbac`, `[domains.<name>].operators` in `Sago.toml`, enforced by `sago apply` via `--as`/`SAGO_ACTOR`).
   - [ ] Domain discovery (gossip/registry).

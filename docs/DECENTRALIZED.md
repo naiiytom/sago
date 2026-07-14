@@ -68,7 +68,15 @@ no central data warehouse and no bulk data movement required.
    if it differs, walks per-row inclusion proofs to report exactly which rows
    diverge — one round trip when in sync, otherwise one `GetInclusionProof`
    call per row in the shorter side.
-3. Per-domain ownership/RBAC enforcement on who may `apply` a target.
+3. ~~Per-domain ownership/RBAC enforcement on who may `apply` a target.~~
+   **Done**: `[domains.<name>]` in `Sago.toml` declares an `operators`
+   allowlist for a domain (`sago-core::rbac`). A domain with no entry is
+   unrestricted (existing configs are unaffected); one with an entry allows
+   only the listed identities, and an entry with an empty list is a
+   deliberate lockout. `sago apply` resolves the actor from `--as <name>` or
+   the `SAGO_ACTOR` environment variable and checks it before touching any
+   target in a governed domain — before any connection/provider I/O, so a
+   denied target never reaches the network.
 4. A gossip/registry mechanism for domains to discover one another.
 
 These are deliberately left as follow-ups: each is a feature in its own right,
