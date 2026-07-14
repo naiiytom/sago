@@ -40,6 +40,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Per-domain RBAC on `apply`**: a new `[domains.<name>]` table in
+  `Sago.toml` declares an `operators` allowlist (`sago-core::rbac`) for a
+  data-mesh `domain`. A domain absent from the table is unrestricted, so
+  existing configs are unaffected; a domain with an entry restricts `sago
+  apply` to its listed operators (an empty list is a deliberate lockout).
+  `sago apply` resolves the actor from the new `--as <name>` flag or the
+  `SAGO_ACTOR` environment variable and checks it before any
+  connection/provider I/O for targets in a governed domain. Third concrete
+  deliverable from the Decentralized Data Architectures follow-ups in
+  `docs/DECENTRALIZED.md`.
 - **Merkle-based reconciliation over gRPC**: `SagoService` gained
   `GetMerkleRoot`/`GetInclusionProof` RPCs, served by `ProviderService` via a
   new `MerkleTree::from_batches` (`sago-core::merkle`) that commits to a

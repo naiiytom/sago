@@ -14,6 +14,12 @@ pub struct Config {
     /// Datasets to track. Defaults to empty for the same reason as `connections`.
     #[serde(default)]
     pub targets: HashMap<String, TargetConfig>,
+    /// Per-domain governance for the data-mesh model (see
+    /// `sago-core::rbac` and `docs/DECENTRALIZED.md`). Defaults to empty: a
+    /// domain with no entry here is unrestricted, so existing configs are
+    /// unaffected by this table's mere existence.
+    #[serde(default)]
+    pub domains: HashMap<String, DomainConfig>,
     pub checks: ChecksConfig,
 }
 
@@ -60,6 +66,19 @@ pub struct TargetConfig {
     /// (data-mesh) setup. Optional and free-form.
     #[serde(default)]
     pub owner: Option<String>,
+}
+
+/// Governance for a data-mesh `domain`: who may run `sago apply` against the
+/// targets tagged with it. See `sago-core::rbac`.
+#[derive(Debug, Deserialize, Default)]
+pub struct DomainConfig {
+    /// Identities allowed to `apply` targets in this domain. Empty means the
+    /// domain has an entry but nobody is authorized — a deliberate lockout,
+    /// not "unrestricted" (that is what *omitting* the domain from this table
+    /// means). Matched case-sensitively against the actor identity resolved
+    /// by the CLI (`--as` or `SAGO_ACTOR`).
+    #[serde(default)]
+    pub operators: Vec<String>,
 }
 
 /// Default number of numeric values retained per column when sampling.
@@ -231,6 +250,66 @@ drift_threshold = 0.05
         let orders = cfg.targets.get("orders").unwrap();
         assert_eq!(orders.domain.as_deref(), Some("sales"));
         assert_eq!(orders.owner.as_deref(), Some("sales-data-team"));
+    }
+
+    #[test]
+    fn test_domains_table_defaults_empty() {
+        // A config with no [domains] table at all parses fine and leaves every
+        // domain unrestricted (no entry to enforce against).
+        let cfg = Config::from_toml(VALID_TOML).unwrap();
+        assert!(cfg.domains.is_empty());
+    }
+
+    #[test]
+    fn test_domains_table_parses_operators() {
+        let toml = r#"
+[project]
+name = "mesh"
+version = "1"
+
+[connections.c]
+type = "s3"
+bucket = "b"
+region = "r"
+
+[targets.orders]
+connection = "c"
+identifier = "orders.parquet"
+domain = "sales"
+
+[domains.sales]
+operators = ["alice", "bob"]
+
+[checks]
+drift_threshold = 0.05
+"#;
+        let cfg = Config::from_toml(toml).unwrap();
+        let sales = cfg.domains.get("sales").unwrap();
+        assert_eq!(
+            sales.operators,
+            vec!["alice".to_string(), "bob".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_domain_entry_without_operators_defaults_empty() {
+        let toml = r#"
+[project]
+name = "mesh"
+version = "1"
+
+[connections.c]
+type = "s3"
+bucket = "b"
+region = "r"
+
+[domains.sales]
+
+[checks]
+drift_threshold = 0.05
+"#;
+        let cfg = Config::from_toml(toml).unwrap();
+        assert!(cfg.domains.get("sales").unwrap().operators.is_empty());
     }
 
     #[test]

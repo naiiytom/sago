@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use clap::Args;
 use sago_core::config::Config;
 use sago_core::connection::build_provider;
+use sago_core::rbac::authorize_apply;
 use sago_core::state::{ProjectState, capture_snapshot};
 use std::path::Path;
 
@@ -10,6 +11,13 @@ pub struct ApplyArgs {
     /// Apply only the named target (default: all)
     #[arg(long)]
     pub target: Option<String>,
+
+    /// Identity to authorize against `[domains.<name>].operators` for
+    /// domain-restricted targets (default: the `SAGO_ACTOR` environment
+    /// variable). Required only for targets whose `domain` has a
+    /// `[domains.<name>]` entry in `Sago.toml`; unrestricted targets ignore it.
+    #[arg(long = "as")]
+    pub actor: Option<String>,
 }
 
 pub async fn run(args: &ApplyArgs) -> Result<()> {
@@ -19,6 +27,7 @@ pub async fn run(args: &ApplyArgs) -> Result<()> {
 
     let cfg = load_config(&cfg_path)?;
     let mut state = ProjectState::load_or_default(&state_path)?;
+    let actor = resolve_actor(args.actor.clone(), std::env::var("SAGO_ACTOR").ok());
 
     let mut applied = Vec::new();
     for (name, tgt) in &cfg.targets {
@@ -26,6 +35,17 @@ pub async fn run(args: &ApplyArgs) -> Result<()> {
             && filter != name
         {
             continue;
+        }
+        if let Some(domain) = &tgt.domain
+            && cfg.domains.contains_key(domain)
+        {
+            let actor = actor.as_deref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "target '{}' is in domain '{}', which requires authorization — pass --as <actor> or set SAGO_ACTOR",
+                    name, domain
+                )
+            })?;
+            authorize_apply(&cfg, name, tgt, actor).map_err(|e| anyhow::anyhow!(e.to_string()))?;
         }
         let conn = cfg.connections.get(&tgt.connection).with_context(|| {
             format!(
@@ -74,4 +94,34 @@ fn load_config(path: &Path) -> Result<Config> {
         )
     })?;
     Ok(Config::from_toml(&content)?)
+}
+
+/// The effective actor identity: the `--as` flag if given, else the
+/// `SAGO_ACTOR` environment variable, else `None` (only an error for targets
+/// that actually require authorization — see `run`).
+fn resolve_actor(flag: Option<String>, env: Option<String>) -> Option<String> {
+    flag.or(env)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_resolve_actor_flag_overrides_env() {
+        assert_eq!(
+            resolve_actor(Some("alice".into()), Some("bob".into())),
+            Some("alice".into())
+        );
+    }
+
+    #[test]
+    fn test_resolve_actor_falls_back_to_env() {
+        assert_eq!(resolve_actor(None, Some("bob".into())), Some("bob".into()));
+    }
+
+    #[test]
+    fn test_resolve_actor_none_when_neither_set() {
+        assert_eq!(resolve_actor(None, None), None);
+    }
 }

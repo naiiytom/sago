@@ -178,6 +178,130 @@ fn test_apply_fails_without_sago_toml() {
         .stderr(predicate::str::contains("Sago.toml not found"));
 }
 
+// A target in a restricted domain, to exercise the RBAC gate without needing a
+// live data source (the gate runs before any provider/connection I/O).
+const RESTRICTED_DOMAIN_TOML: &str = r#"
+[project]
+name = "mesh"
+version = "0.1.0"
+
+[connections.archive]
+type = "s3"
+bucket = "my-data"
+region = "us-east-1"
+
+[targets.orders]
+connection = "archive"
+identifier = "orders.parquet"
+domain = "sales"
+
+[targets.misc]
+connection = "archive"
+identifier = "misc.parquet"
+
+[domains.sales]
+operators = ["alice"]
+
+[checks]
+drift_threshold = 0.05
+"#;
+
+#[test]
+fn test_apply_restricted_target_without_actor_fails() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("Sago.toml"), RESTRICTED_DOMAIN_TOML).unwrap();
+    Command::cargo_bin("sago")
+        .unwrap()
+        .args(["apply", "--target", "orders"])
+        .env_remove("SAGO_ACTOR")
+        .current_dir(tmp.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("requires authorization"));
+}
+
+#[test]
+fn test_apply_restricted_target_with_unauthorized_actor_fails() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("Sago.toml"), RESTRICTED_DOMAIN_TOML).unwrap();
+    Command::cargo_bin("sago")
+        .unwrap()
+        .args(["apply", "--target", "orders", "--as", "eve"])
+        .current_dir(tmp.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not authorized"));
+}
+
+#[test]
+fn test_apply_restricted_target_with_authorized_actor_passes_rbac_gate() {
+    // "alice" is authorized, so the RBAC check must pass; the command still
+    // fails afterward on network I/O (no real S3 endpoint), but crucially NOT
+    // with an authorization error — proving the gate let it through.
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("Sago.toml"), RESTRICTED_DOMAIN_TOML).unwrap();
+    let out = Command::cargo_bin("sago")
+        .unwrap()
+        .args(["apply", "--target", "orders", "--as", "alice"])
+        .current_dir(tmp.path())
+        .assert();
+    let stderr = String::from_utf8_lossy(&out.get_output().stderr).to_string();
+    assert!(
+        !stderr.contains("not authorized") && !stderr.contains("requires authorization"),
+        "authorized actor should pass the RBAC gate, but got: {stderr}"
+    );
+}
+
+#[test]
+fn test_apply_restricted_target_authorized_via_env_var() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("Sago.toml"), RESTRICTED_DOMAIN_TOML).unwrap();
+    let out = Command::cargo_bin("sago")
+        .unwrap()
+        .args(["apply", "--target", "orders"])
+        .env("SAGO_ACTOR", "alice")
+        .current_dir(tmp.path())
+        .assert();
+    let stderr = String::from_utf8_lossy(&out.get_output().stderr).to_string();
+    assert!(
+        !stderr.contains("not authorized") && !stderr.contains("requires authorization"),
+        "SAGO_ACTOR should authorize the same as --as, but got: {stderr}"
+    );
+}
+
+#[test]
+fn test_apply_as_flag_overrides_env_var() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("Sago.toml"), RESTRICTED_DOMAIN_TOML).unwrap();
+    Command::cargo_bin("sago")
+        .unwrap()
+        .args(["apply", "--target", "orders", "--as", "eve"])
+        .env("SAGO_ACTOR", "alice")
+        .current_dir(tmp.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not authorized"));
+}
+
+#[test]
+fn test_apply_unrestricted_target_ignores_missing_actor() {
+    // "misc" has no domain, so it is unrestricted regardless of RBAC config
+    // elsewhere in the same file — no actor needed at all.
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("Sago.toml"), RESTRICTED_DOMAIN_TOML).unwrap();
+    let out = Command::cargo_bin("sago")
+        .unwrap()
+        .args(["apply", "--target", "misc"])
+        .env_remove("SAGO_ACTOR")
+        .current_dir(tmp.path())
+        .assert();
+    let stderr = String::from_utf8_lossy(&out.get_output().stderr).to_string();
+    assert!(
+        !stderr.contains("not authorized") && !stderr.contains("requires authorization"),
+        "unrestricted target should not require an actor, but got: {stderr}"
+    );
+}
+
 #[test]
 fn test_apply_fails_with_legacy_schema_block() {
     let tmp = tempfile::tempdir().unwrap();
