@@ -5,7 +5,9 @@ use tracing_subscriber::FmtSubscriber;
 mod commands;
 mod report;
 
-use commands::{apply::ApplyArgs, diff::DiffArgs, init::InitArgs, plan::PlanArgs};
+use commands::{
+    apply::ApplyArgs, diff::DiffArgs, federate::FederateArgs, init::InitArgs, plan::PlanArgs,
+};
 
 #[derive(Parser)]
 #[command(name = "sago")]
@@ -29,6 +31,8 @@ enum Commands {
     Plan(PlanArgs),
     /// One-shot cross-modal comparison of two sources
     Diff(DiffArgs),
+    /// Show drift grouped by data-mesh domain
+    Federate(FederateArgs),
     /// Launch interactive terminal explorer
     Explore,
 }
@@ -50,6 +54,8 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         // threshold, so CI can gate on it.
         Commands::Plan(a) => commands::plan::run(a).await,
         Commands::Diff(a) => commands::diff::run(a).await.map(|()| ExitCode::SUCCESS),
+        // Like `plan`, `federate` exits non-zero on a drift-threshold breach.
+        Commands::Federate(a) => commands::federate::run(a).await,
         Commands::Explore => {
             commands::explore::run()?;
             Ok(ExitCode::SUCCESS)

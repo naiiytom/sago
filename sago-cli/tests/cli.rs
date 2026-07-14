@@ -6,7 +6,7 @@ fn test_help_lists_all_four_commands() {
     let mut cmd = Command::cargo_bin("sago").unwrap();
     let out = cmd.arg("--help").assert().success();
     let stdout = String::from_utf8_lossy(&out.get_output().stdout).to_string();
-    for word in ["init", "apply", "plan", "diff"] {
+    for word in ["init", "apply", "plan", "diff", "federate"] {
         assert!(
             stdout.contains(word),
             "help text missing '{}': {}",
@@ -264,6 +264,69 @@ fn test_plan_rejects_out_of_range_rename_threshold() {
 }
 
 #[test]
+fn test_federate_fails_without_state() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("Sago.toml"), SAMPLE_TOML).unwrap();
+    let mut cmd = Command::cargo_bin("sago").unwrap();
+    cmd.arg("federate")
+        .current_dir(tmp.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("apply").or(predicate::str::contains("state")));
+}
+
+#[test]
+fn test_federate_nonexistent_domain_exits_success() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("Sago.toml"), SAMPLE_TOML).unwrap();
+    let sago_dir = tmp.path().join(".sago");
+    std::fs::create_dir_all(&sago_dir).unwrap();
+    std::fs::write(
+        sago_dir.join("state.json"),
+        r#"{"schema_version":1,"snapshots":{}}"#,
+    )
+    .unwrap();
+
+    Command::cargo_bin("sago")
+        .unwrap()
+        .args(["federate", "--domain", "no_such_domain"])
+        .current_dir(tmp.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("nothing to federate"));
+}
+
+#[test]
+fn test_federate_rejects_out_of_range_rename_threshold() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("Sago.toml"), SAMPLE_TOML).unwrap();
+    let sago_dir = tmp.path().join(".sago");
+    std::fs::create_dir_all(&sago_dir).unwrap();
+    std::fs::write(
+        sago_dir.join("state.json"),
+        r#"{"schema_version":1,"snapshots":{}}"#,
+    )
+    .unwrap();
+
+    Command::cargo_bin("sago")
+        .unwrap()
+        .args(["federate", "--rename-threshold", "1.5"])
+        .current_dir(tmp.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("rename-threshold"));
+}
+
+#[test]
+fn test_federate_help() {
+    Command::cargo_bin("sago")
+        .unwrap()
+        .args(["federate", "--help"])
+        .assert()
+        .success();
+}
+
+#[test]
 fn test_diff_fails_with_unknown_connection() {
     let tmp = tempfile::tempdir().unwrap();
     std::fs::write(tmp.path().join("Sago.toml"), SAMPLE_TOML).unwrap();
@@ -291,7 +354,7 @@ fn test_full_init_then_help_subcommands() {
         .success();
 
     // each subcommand --help still works inside an initialized project
-    for sub in ["apply", "plan", "diff"] {
+    for sub in ["apply", "plan", "diff", "federate"] {
         Command::cargo_bin("sago")
             .unwrap()
             .arg(sub)

@@ -33,7 +33,7 @@
 - [x] **Merkle Trees**: `sago-core::merkle::MerkleTree` provides SHA-256 commitments with domain-separated leaf/node hashing, a root digest, and inclusion proofs (`proof`/`verify_proof`) for verifiable data synchronization.
 - [x] **WASM Integration**: `sago-core` gained an `io` feature (default-on) that gates the data-source providers; with `default-features = false` the pure-analysis modules build for `wasm32-unknown-unknown`. The new `sago-wasm` crate exposes semantic inference, three-way schema merge, and Merkle roots to JavaScript via `wasm-bindgen`.
 - [~] **Decentralized Data Architectures** *(foundation only — primitives shipped, features deferred)*: This is a direction rather than a single feature. The enabling **primitives** now exist — Merkle commitments for trust-minimised sync, three-way merge for federated schema governance, the `SagoService` gRPC *interface definition*, and per-target `domain`/`owner` metadata in config. The consumer-facing pieces are **not yet built** and are tracked as concrete follow-ups in [DECENTRALIZED.md](./DECENTRALIZED.md):
-  - [ ] `sago federate` view grouping `plan`/`diff` output by `domain`.
+  - [x] `sago federate` view grouping `plan` output by `domain`.
   - [x] A reference `SagoService` **server** (`sago-sdk::grpc`, `grpc` feature) and the generated client.
   - [ ] A higher-level client wrapper that reconciles divergence via Merkle inclusion proofs.
   - [ ] Per-domain ownership / RBAC enforcement.

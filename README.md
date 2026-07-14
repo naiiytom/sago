@@ -51,6 +51,13 @@ Sago is a high-performance, declarative data reliability framework written in Ru
     sago diff warehouse:public.users archive:users.parquet
     ```
 
+    In a data-mesh setup where targets declare a `domain` (see
+    `TargetConfig::domain`/`owner` in `Sago.toml`), group drift by domain:
+    ```bash
+    sago federate                 # every domain, grouped
+    sago federate --domain sales  # just one domain
+    ```
+
 ## Architecture
 
 Sago is composed of the following components:

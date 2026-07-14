@@ -52,7 +52,12 @@ no central data warehouse and no bulk data movement required.
 
 ## Concrete next steps (not yet implemented)
 
-1. A `sago federate` view that groups `plan`/`diff` output by `domain`.
+1. ~~A `sago federate` view that groups `plan`/`diff` output by `domain`.~~
+   **Done**: `sago federate [--domain <name>]` runs the same baseline-vs-live
+   drift computation as `sago plan`, but groups the report by each target's
+   `domain` (alphabetically, with untagged targets grouped last under
+   "(unassigned)") and prints the `owner` alongside each domain's targets. It
+   gates the exit code and writes a JSON artifact identically to `plan`.
 2. A `SagoService` client wrapper in `sago-sdk` that fetches a remote node's
    Merkle root and reconciles divergence using inclusion proofs.
 3. Per-domain ownership/RBAC enforcement on who may `apply` a target.

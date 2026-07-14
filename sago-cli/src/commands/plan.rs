@@ -37,32 +37,38 @@ pub struct PlanArgs {
     pub rename_threshold: Option<f64>,
 }
 
-pub async fn run(args: &PlanArgs) -> Result<ExitCode> {
-    let cwd = std::env::current_dir()?;
-    let cfg_path = cwd.join("Sago.toml");
-    let state_path = cwd.join(".sago").join("state.json");
+/// A target's computed drift report plus the data-mesh metadata (`domain`,
+/// `owner`) needed to group it in `sago federate`.
+pub(crate) struct TargetReport {
+    pub name: String,
+    pub domain: Option<String>,
+    pub owner: Option<String>,
+    pub report: DiffReport,
+}
 
-    let cfg = load_config(&cfg_path)?;
-    if !state_path.exists() {
-        bail!(
-            "no state file at {} — run `sago apply` first",
-            state_path.display()
-        );
-    }
-    let state = ProjectState::load(&state_path)?;
-    let threshold = cfg.checks.drift_threshold;
-
-    // CLI flag overrides the configured rename threshold; otherwise use config.
-    let rename_confidence = resolve_rename_threshold(
-        args.rename_threshold,
-        cfg.checks.rename_confidence_threshold,
-    )?;
-    let rename_opts = RenameOptions::with_min_confidence(rename_confidence);
-
+/// Compute baseline-vs-live drift reports for every target matching the
+/// optional `target_filter` (exact name) and `domain_filter` (exact
+/// `TargetConfig::domain`). Shared by `sago plan` and `sago federate` so both
+/// commands see identical drift computation — only the presentation differs.
+///
+/// Filtering happens before any provider I/O, so scoping to one domain never
+/// reaches out to another domain's connections.
+pub(crate) async fn build_target_reports(
+    cfg: &Config,
+    state: &ProjectState,
+    target_filter: Option<&str>,
+    domain_filter: Option<&str>,
+    rename_opts: &RenameOptions,
+) -> Result<Vec<TargetReport>> {
     let mut reports = Vec::new();
     for (name, tgt) in &cfg.targets {
-        if let Some(filter) = &args.target
+        if let Some(filter) = target_filter
             && filter != name
+        {
+            continue;
+        }
+        if let Some(domain) = domain_filter
+            && tgt.domain.as_deref() != Some(domain)
         {
             continue;
         }
@@ -101,7 +107,7 @@ pub async fn run(args: &PlanArgs) -> Result<ExitCode> {
             &mut schema_drift,
             &baseline_profiles,
             &live_profiles,
-            &rename_opts,
+            rename_opts,
         );
 
         let mut data_drift =
@@ -124,19 +130,55 @@ pub async fn run(args: &PlanArgs) -> Result<ExitCode> {
             &schema_drift,
         );
 
-        reports.push(DiffReport {
-            source_identifier: format!("baseline:{}", name),
-            target_identifier: format!("live:{}", name),
-            schema_drift,
-            data_drift,
-            semantic_drifts,
+        reports.push(TargetReport {
+            name: name.clone(),
+            domain: tgt.domain.clone(),
+            owner: tgt.owner.clone(),
+            report: DiffReport {
+                source_identifier: format!("baseline:{}", name),
+                target_identifier: format!("live:{}", name),
+                schema_drift,
+                data_drift,
+                semantic_drifts,
+            },
         });
     }
 
-    if reports.is_empty() {
+    // Deterministic order: HashMap iteration over `cfg.targets` is unordered.
+    reports.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(reports)
+}
+
+pub async fn run(args: &PlanArgs) -> Result<ExitCode> {
+    let cwd = std::env::current_dir()?;
+    let cfg_path = cwd.join("Sago.toml");
+    let state_path = cwd.join(".sago").join("state.json");
+
+    let cfg = load_config(&cfg_path)?;
+    if !state_path.exists() {
+        bail!(
+            "no state file at {} — run `sago apply` first",
+            state_path.display()
+        );
+    }
+    let state = ProjectState::load(&state_path)?;
+    let threshold = cfg.checks.drift_threshold;
+
+    // CLI flag overrides the configured rename threshold; otherwise use config.
+    let rename_confidence = resolve_rename_threshold(
+        args.rename_threshold,
+        cfg.checks.rename_confidence_threshold,
+    )?;
+    let rename_opts = RenameOptions::with_min_confidence(rename_confidence);
+
+    let target_reports =
+        build_target_reports(&cfg, &state, args.target.as_deref(), None, &rename_opts).await?;
+
+    if target_reports.is_empty() {
         println!("nothing to plan (no matching targets)");
         return Ok(ExitCode::SUCCESS);
     }
+    let reports: Vec<DiffReport> = target_reports.into_iter().map(|tr| tr.report).collect();
 
     print_terminal(&reports);
 
@@ -162,7 +204,7 @@ pub async fn run(args: &PlanArgs) -> Result<ExitCode> {
 }
 
 /// Names (`target:column`) of every column whose PSI breaches `threshold`.
-fn collect_breaches(reports: &[DiffReport], threshold: f64) -> Vec<String> {
+pub(crate) fn collect_breaches(reports: &[DiffReport], threshold: f64) -> Vec<String> {
     let mut breaches = Vec::new();
     for r in reports {
         for (col, drift) in &r.data_drift.column_drifts {
@@ -222,7 +264,7 @@ pub(crate) fn compute_semantic_drift(
     out
 }
 
-fn load_config(path: &Path) -> Result<Config> {
+pub(crate) fn load_config(path: &Path) -> Result<Config> {
     let content = std::fs::read_to_string(path).with_context(|| {
         format!(
             "Sago.toml not found at {} (run `sago init`)",

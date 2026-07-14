@@ -40,6 +40,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`sago federate`**: a new subcommand that runs the same baseline-vs-live
+  drift computation as `sago plan`, but groups the report by each target's
+  `domain` (data-mesh metadata already on `TargetConfig`) instead of a flat
+  list — alphabetically, with untagged targets grouped last under
+  "(unassigned)", and each domain's targets annotated with their `owner`.
+  Supports `--domain <name>` to scope to a single domain, gates its exit code
+  on `checks.drift_threshold` exactly like `plan`, and writes the same JSON
+  artifact shape. The first concrete deliverable from the Decentralized Data
+  Architectures follow-ups in `docs/DECENTRALIZED.md`.
 - **gRPC `SagoService` server**: `sago-sdk::grpc::ProviderService` (behind the
   new `sago-sdk` `grpc` feature) wraps any `DataProvider` and serves the
   `GetSchema`/`Diff` RPCs over tonic, with proto↔core type conversions, an
