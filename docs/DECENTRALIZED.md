@@ -25,8 +25,8 @@ Sago's Phase 5 work produced the primitives a decentralized setup needs:
   flags genuine conflicts, so federated schema governance has a deterministic
   resolution step.
 - **gRPC interface** (`sago-proto`) — `SagoService` lets a node expose
-  `GetSchema` / `Diff` remotely, the natural transport for a federation of
-  independently deployed providers.
+  `GetSchema` / `Diff` / `GetMerkleRoot` / `GetInclusionProof` remotely, the
+  natural transport for a federation of independently deployed providers.
 - **Per-target ownership metadata** (`config::TargetConfig::domain` / `owner`) —
   targets can now declare which **domain** owns them, the minimal config-level
   step toward treating a project as a federation of independently owned targets.
@@ -58,8 +58,16 @@ no central data warehouse and no bulk data movement required.
    `domain` (alphabetically, with untagged targets grouped last under
    "(unassigned)") and prints the `owner` alongside each domain's targets. It
    gates the exit code and writes a JSON artifact identically to `plan`.
-2. A `SagoService` client wrapper in `sago-sdk` that fetches a remote node's
-   Merkle root and reconciles divergence using inclusion proofs.
+2. ~~A `SagoService` client wrapper in `sago-sdk` that fetches a remote node's
+   Merkle root and reconciles divergence using inclusion proofs.~~ **Done**:
+   `SagoService` gained `GetMerkleRoot`/`GetInclusionProof` RPCs (served by
+   `ProviderService` over the caller's `DataProvider`, via the new
+   `MerkleTree::from_batches` row-level commitment in `sago-core::merkle`).
+   `sago_sdk::grpc::reconcile` is the client-side counterpart: given a Merkle
+   tree built from your own copy of a dataset, it fetches the remote root, and
+   if it differs, walks per-row inclusion proofs to report exactly which rows
+   diverge — one round trip when in sync, otherwise one `GetInclusionProof`
+   call per row in the shorter side.
 3. Per-domain ownership/RBAC enforcement on who may `apply` a target.
 4. A gossip/registry mechanism for domains to discover one another.
 
