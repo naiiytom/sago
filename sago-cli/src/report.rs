@@ -2,6 +2,26 @@ use anyhow::{Context, Result};
 use sago_core::diff::DiffReport;
 use std::path::Path;
 
+/// Output format shared by every subcommand that can print either
+/// human-readable text or machine-readable JSON. Before this, the only way
+/// for a script to consume `plan`/`diff`/`federate` output was to know about
+/// (or pass) `--out` and read the artifact file separately; `--format json`
+/// prints the same data directly to stdout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum OutputFormat {
+    Text,
+    Json,
+}
+
+/// Serialize `reports` as pretty JSON to stdout.
+pub fn print_json(reports: &[DiffReport]) -> Result<()> {
+    println!(
+        "{}",
+        serde_json::to_string_pretty(reports).context("failed to serialize reports as JSON")?
+    );
+    Ok(())
+}
+
 pub fn print_terminal(reports: &[DiffReport]) {
     let _ = print_terminal_to(reports, &mut std::io::stdout());
 }
@@ -87,7 +107,6 @@ pub fn print_terminal_to<W: std::io::Write>(
     Ok(())
 }
 
-#[allow(dead_code)]
 pub fn write_artifact(reports: &[DiffReport], path: &Path) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -97,7 +116,6 @@ pub fn write_artifact(reports: &[DiffReport], path: &Path) -> Result<()> {
     Ok(())
 }
 
-#[allow(dead_code)]
 pub fn default_artifact_path() -> std::path::PathBuf {
     let ts = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
     std::path::PathBuf::from(".sago")
@@ -192,6 +210,7 @@ mod tests {
             mean: Some(1.0),
             min: Some(0.0),
             max: Some(2.0),
+            variance: None,
         };
         drifts.insert(
             "score".into(),
@@ -206,6 +225,7 @@ mod tests {
                 ks_statistic: None,
                 ks_p_value: None,
                 psi_statistic: None,
+                categorical_drift: None,
             },
         );
         let mut r = empty_report();
@@ -226,6 +246,7 @@ mod tests {
             mean: Some(1.0),
             min: Some(1.0),
             max: Some(1.0),
+            variance: None,
         };
         drifts.insert(
             "stable".into(),
@@ -237,6 +258,7 @@ mod tests {
                 ks_statistic: None,
                 ks_p_value: None,
                 psi_statistic: None,
+                categorical_drift: None,
             },
         );
         let mut r = empty_report();
@@ -258,6 +280,7 @@ mod tests {
             mean: Some(1.0),
             min: Some(0.0),
             max: Some(2.0),
+            variance: None,
         };
         drifts.insert(
             "score".into(),
@@ -269,6 +292,7 @@ mod tests {
                 ks_statistic: Some(0.42),
                 ks_p_value: Some(0.001),
                 psi_statistic: Some(0.37),
+                categorical_drift: None,
             },
         );
         let mut r = empty_report();
@@ -292,6 +316,7 @@ mod tests {
             mean: Some(1.0),
             min: Some(0.0),
             max: Some(2.0),
+            variance: None,
         };
         let drift = |psi: f64| ColumnDrift {
             source_stats: stats.clone(),
@@ -301,6 +326,7 @@ mod tests {
             ks_statistic: None,
             ks_p_value: None,
             psi_statistic: Some(psi),
+            categorical_drift: None,
         };
         let mut drifts = HashMap::new();
         drifts.insert("zebra".to_string(), drift(0.2));

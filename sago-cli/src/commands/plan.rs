@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Args;
 use sago_core::config::Config;
-use sago_core::connection::build_provider;
+use sago_core::connection::ProviderCache;
 use sago_core::diff::DiffReport;
 use sago_core::drift::{
     SemanticDrift, detect_data_drift_from_stats, detect_schema_drift, psi_from_samples,
@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use crate::report::{default_artifact_path, print_terminal, write_artifact};
+use crate::report::{OutputFormat, default_artifact_path, print_json, print_terminal, write_artifact};
 
 /// Number of numeric values to retain per column when sampling the live dataset
 /// for the PSI drift metric. Shares the config default so live and baseline
@@ -35,6 +35,10 @@ pub struct PlanArgs {
     /// (default: checks.rename_confidence_threshold from Sago.toml).
     #[arg(long)]
     pub rename_threshold: Option<f64>,
+
+    /// Output format: human-readable text (default) or JSON on stdout.
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    pub format: OutputFormat,
 }
 
 /// A target's computed drift report plus the data-mesh metadata (`domain`,
@@ -60,7 +64,22 @@ pub(crate) async fn build_target_reports(
     domain_filter: Option<&str>,
     rename_opts: &RenameOptions,
 ) -> Result<Vec<TargetReport>> {
+    // A typo'd --target used to silently produce zero matching targets (and
+    // thus a quiet "nothing to plan" success), indistinguishable from a
+    // correctly-scoped run that legitimately has no targets. Validate the
+    // name against the known set up front so a typo is a clear error.
+    if let Some(filter) = target_filter
+        && !cfg.targets.contains_key(filter)
+    {
+        bail!("'{filter}' is not a known target name (checked Sago.toml's [targets.*] entries)");
+    }
+
     let mut reports = Vec::new();
+    // Shared across every target so targets on the same named connection
+    // reuse one provider/connection pool instead of each building its own —
+    // see ProviderCache's doc comment for the Postgres connection-budget
+    // impact this avoids.
+    let providers = ProviderCache::new();
     for (name, tgt) in &cfg.targets {
         if let Some(filter) = target_filter
             && filter != name
@@ -85,7 +104,7 @@ pub(crate) async fn build_target_reports(
                 name, tgt.connection
             )
         })?;
-        let provider = build_provider(conn).await?;
+        let provider = providers.get_or_build(&tgt.connection, conn).await?;
         // Capture live samples so we can compute the (scale-free) PSI drift
         // metric against the persisted baseline samples and gate on
         // `checks.drift_threshold`.
@@ -175,12 +194,20 @@ pub async fn run(args: &PlanArgs) -> Result<ExitCode> {
         build_target_reports(&cfg, &state, args.target.as_deref(), None, &rename_opts).await?;
 
     if target_reports.is_empty() {
-        println!("nothing to plan (no matching targets)");
+        if args.format == OutputFormat::Json {
+            print_json(&[])?;
+        } else {
+            println!("nothing to plan (no matching targets)");
+        }
         return Ok(ExitCode::SUCCESS);
     }
     let reports: Vec<DiffReport> = target_reports.into_iter().map(|tr| tr.report).collect();
 
-    print_terminal(&reports);
+    if args.format == OutputFormat::Json {
+        print_json(&reports)?;
+    } else {
+        print_terminal(&reports);
+    }
 
     // Gate on the configured drift threshold: any column whose PSI exceeds it is
     // a breach. `sago plan` then exits non-zero so CI pipelines can fail on drift.
@@ -316,6 +343,7 @@ mod tests {
             mean: Some(1.0),
             min: Some(0.0),
             max: Some(2.0),
+            variance: None,
         };
         let mut column_drifts = HashMap::new();
         column_drifts.insert(
@@ -328,6 +356,7 @@ mod tests {
                 ks_statistic: None,
                 ks_p_value: None,
                 psi_statistic: psi,
+                categorical_drift: None,
             },
         );
         DiffReport {

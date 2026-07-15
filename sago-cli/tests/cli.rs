@@ -122,7 +122,9 @@ drift_threshold = 0.05
 
 #[test]
 fn test_apply_fails_on_unknown_connection_reference() {
-    // A target referencing a non-existent connection must fail loudly.
+    // A target referencing a non-existent connection must fail loudly, at
+    // config-load time (before any provider I/O), not buried in per-target
+    // apply output.
     let tmp = tempfile::tempdir().unwrap();
     std::fs::write(tmp.path().join("Sago.toml"), BAD_CONN_TOML).unwrap();
     Command::cargo_bin("sago")
@@ -131,31 +133,34 @@ fn test_apply_fails_on_unknown_connection_reference() {
         .current_dir(tmp.path())
         .assert()
         .failure()
-        .stderr(predicate::str::contains("unknown connection"));
+        .stderr(predicate::str::contains("does not match any"));
 }
 
 #[test]
-fn test_apply_target_filter_skips_other_targets() {
-    // With --target naming a well-formed (but S3) target, the orphan target's
-    // bad connection is never touched, so we don't get the unknown-connection
-    // error. (The S3 fetch itself will fail on network/creds, but crucially NOT
-    // with "unknown connection" — proving the filter excluded 'orphan'.)
+fn test_apply_target_filter_still_validates_unrelated_bad_connections() {
+    // Regression: Config::validate() checks every target's connection
+    // reference up front, regardless of --target — so a config with an
+    // unrelated broken target ("orphan") fails to load at all, even when
+    // filtering to a different, well-formed target ("events"). This is a
+    // deliberate trade: a config-wide typo is now caught immediately with a
+    // single clear error, rather than only surfacing once `apply` happens to
+    // iterate the broken target.
     let tmp = tempfile::tempdir().unwrap();
     std::fs::write(tmp.path().join("Sago.toml"), BAD_CONN_TOML).unwrap();
-    let out = Command::cargo_bin("sago")
+    Command::cargo_bin("sago")
         .unwrap()
         .args(["apply", "--target", "events"])
         .current_dir(tmp.path())
-        .assert();
-    let stderr = String::from_utf8_lossy(&out.get_output().stderr).to_string();
-    assert!(
-        !stderr.contains("unknown connection"),
-        "the orphan target should have been filtered out, but got: {stderr}"
-    );
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("orphan"));
 }
 
 #[test]
-fn test_apply_nonexistent_target_does_nothing() {
+fn test_apply_nonexistent_target_fails_loudly() {
+    // Regression: a typo'd --target used to silently no-op with exit 0
+    // ("nothing to apply"), indistinguishable from a correctly-scoped run
+    // with genuinely no matching targets. It must now error.
     let tmp = tempfile::tempdir().unwrap();
     std::fs::write(tmp.path().join("Sago.toml"), SAMPLE_TOML).unwrap();
     Command::cargo_bin("sago")
@@ -163,8 +168,8 @@ fn test_apply_nonexistent_target_does_nothing() {
         .args(["apply", "--target", "no_such_target"])
         .current_dir(tmp.path())
         .assert()
-        .success()
-        .stdout(predicate::str::contains("nothing to apply"));
+        .failure()
+        .stderr(predicate::str::contains("not a known target"));
 }
 
 #[test]
@@ -343,9 +348,9 @@ fn test_plan_fails_without_state() {
 }
 
 #[test]
-fn test_plan_nonexistent_target_exits_success() {
-    // With a state file present but --target naming an unknown target, plan has
-    // nothing to compare and must exit 0 (not the drift-breach failure code).
+fn test_plan_nonexistent_target_fails_loudly() {
+    // Regression: a typo'd --target used to silently no-op with exit 0
+    // ("nothing to plan"), the same bug as apply's --target. It must now error.
     let tmp = tempfile::tempdir().unwrap();
     std::fs::write(tmp.path().join("Sago.toml"), SAMPLE_TOML).unwrap();
     let sago_dir = tmp.path().join(".sago");
@@ -361,8 +366,8 @@ fn test_plan_nonexistent_target_exits_success() {
         .args(["plan", "--target", "no_such_target"])
         .current_dir(tmp.path())
         .assert()
-        .success()
-        .stdout(predicate::str::contains("nothing to plan"));
+        .failure()
+        .stderr(predicate::str::contains("not a known target"));
 }
 
 #[test]
@@ -400,7 +405,11 @@ fn test_federate_fails_without_state() {
 }
 
 #[test]
-fn test_federate_nonexistent_domain_exits_success() {
+fn test_federate_nonexistent_domain_fails_loudly() {
+    // Regression: a typo'd/unknown --domain used to silently no-op with
+    // exit 0 ("nothing to federate"), indistinguishable from a real domain
+    // that simply has zero targets right now. It must now error, since
+    // SAMPLE_TOML declares no domains at all.
     let tmp = tempfile::tempdir().unwrap();
     std::fs::write(tmp.path().join("Sago.toml"), SAMPLE_TOML).unwrap();
     let sago_dir = tmp.path().join(".sago");
@@ -414,6 +423,32 @@ fn test_federate_nonexistent_domain_exits_success() {
     Command::cargo_bin("sago")
         .unwrap()
         .args(["federate", "--domain", "no_such_domain"])
+        .current_dir(tmp.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not a known domain"));
+}
+
+#[test]
+fn test_federate_known_domain_with_zero_targets_exits_success() {
+    // A domain that IS declared (via [domains.<name>]) but has no target
+    // tagged with it yet must still report the softer "nothing to
+    // federate" message and exit 0 — only a genuinely unknown domain name
+    // should error.
+    let toml = format!("{SAMPLE_TOML}\n[domains.marketing]\n");
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("Sago.toml"), toml).unwrap();
+    let sago_dir = tmp.path().join(".sago");
+    std::fs::create_dir_all(&sago_dir).unwrap();
+    std::fs::write(
+        sago_dir.join("state.json"),
+        r#"{"schema_version":1,"snapshots":{}}"#,
+    )
+    .unwrap();
+
+    Command::cargo_bin("sago")
+        .unwrap()
+        .args(["federate", "--domain", "marketing"])
         .current_dir(tmp.path())
         .assert()
         .success()
@@ -462,6 +497,35 @@ fn test_diff_fails_with_unknown_connection() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("unknown connection"));
+}
+
+#[test]
+fn test_log_level_accepted_after_subcommand() {
+    // Regression: --log-level was a top-level-only arg (no global = true), so
+    // clap rejected it when placed after the subcommand — the natural place
+    // a user would put it (`sago apply --log-level debug`).
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("Sago.toml"), SAMPLE_TOML).unwrap();
+    Command::cargo_bin("sago")
+        .unwrap()
+        .args(["apply", "--log-level", "debug", "--target", "no_such_target"])
+        .current_dir(tmp.path())
+        .assert()
+        .failure() // still fails on the typo'd target — but NOT a clap arg-parsing error
+        .stderr(predicate::str::contains("not a known target"));
+}
+
+#[test]
+fn test_log_level_still_accepted_before_subcommand() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("Sago.toml"), SAMPLE_TOML).unwrap();
+    Command::cargo_bin("sago")
+        .unwrap()
+        .args(["--log-level", "debug", "apply", "--target", "no_such_target"])
+        .current_dir(tmp.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not a known target"));
 }
 
 #[test]
@@ -671,4 +735,98 @@ fn test_domains_fails_without_sago_toml() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("Sago.toml not found"));
+}
+
+#[test]
+fn test_domains_format_json_outputs_valid_array() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("Sago.toml"), MESH_TOML).unwrap();
+    let out = Command::cargo_bin("sago")
+        .unwrap()
+        .args(["domains", "--format", "json"])
+        .current_dir(tmp.path())
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&out.get_output().stdout).to_string();
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
+    let arr = parsed.as_array().expect("top-level array");
+    assert!(arr.iter().any(|d| d["name"] == "sales"));
+    let sales = arr.iter().find(|d| d["name"] == "sales").unwrap();
+    assert_eq!(sales["endpoint"], "http://sales.internal:50051");
+}
+
+#[test]
+fn test_domains_with_targets_filter_excludes_empty_domains() {
+    let toml = format!(
+        "{MESH_TOML}\n[domains.marketing]\nendpoint = \"http://marketing.internal:1\"\n"
+    );
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("Sago.toml"), toml).unwrap();
+    let out = Command::cargo_bin("sago")
+        .unwrap()
+        .args(["domains", "--with-targets"])
+        .current_dir(tmp.path())
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&out.get_output().stdout).to_string();
+    assert!(stdout.contains("sales"), "sales has a target, should show");
+    assert!(
+        !stdout.contains("marketing"),
+        "marketing has zero targets, should be filtered out: {stdout}"
+    );
+}
+
+#[test]
+fn test_domains_missing_endpoint_filter() {
+    let toml = format!("{MESH_TOML}\n[domains.finance]\noperators = [\"bob\"]\n");
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("Sago.toml"), toml).unwrap();
+    let out = Command::cargo_bin("sago")
+        .unwrap()
+        .args(["domains", "--missing-endpoint"])
+        .current_dir(tmp.path())
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&out.get_output().stdout).to_string();
+    assert!(
+        !stdout.contains("sales:"),
+        "sales has an endpoint, should be filtered out"
+    );
+    assert!(
+        stdout.contains("finance"),
+        "finance has no endpoint, should show: {stdout}"
+    );
+}
+
+#[test]
+fn test_plan_format_json_outputs_valid_array_when_empty() {
+    // A config with no targets at all has nothing to plan, regardless of
+    // state contents — the empty-JSON-array path.
+    let toml = r#"
+[project]
+name = "empty"
+version = "0.1.0"
+
+[checks]
+drift_threshold = 0.05
+"#;
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("Sago.toml"), toml).unwrap();
+    let sago_dir = tmp.path().join(".sago");
+    std::fs::create_dir_all(&sago_dir).unwrap();
+    std::fs::write(
+        sago_dir.join("state.json"),
+        r#"{"schema_version":1,"snapshots":{}}"#,
+    )
+    .unwrap();
+
+    let out = Command::cargo_bin("sago")
+        .unwrap()
+        .args(["plan", "--format", "json"])
+        .current_dir(tmp.path())
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&out.get_output().stdout).to_string();
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
+    assert!(parsed.as_array().unwrap().is_empty());
 }
