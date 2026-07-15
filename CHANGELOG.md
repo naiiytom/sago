@@ -22,6 +22,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Tightened email/URL semantic-type regexes and raised the name-only rename
   floor so near-miss sibling columns (`address_line1`/`address_line2`) are not
   mistaken for renames.
+- **Semantic inference sampling**: `infer_semantic_type` now samples up to 100
+  values spread evenly across a column instead of only its first 100 rows, so
+  a homogeneous prefix (sorted data, a batch boundary) no longer biases the
+  classification away from the column's actual composition. Columns of 100
+  rows or fewer are still checked in full.
 
 ### Changed
 
