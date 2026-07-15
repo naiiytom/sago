@@ -40,6 +40,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Merkle benchmarks**: `sago-core/benches/merkle.rs` (Criterion, `cargo
+  bench -p sago-core --bench merkle`) measures tree construction and
+  per-proof generation/verification cost across N=10^3 to 10^6 records,
+  closing the "planned for Phase 5" item in `docs/BENCHMARKS.md`. Results:
+  construction is O(N) at ~240 ns/record; proof generation and verification
+  stay in single-digit microseconds even at 10^6 leaves, confirming the O(log
+  N) shape that makes `sago_sdk::grpc::reconcile` viable on large partitions.
 - **`sago domains`**: a new subcommand plus `sago-core::registry` that lists
   every data-mesh domain a project knows about — the union of `[domains]`
   entries and every target's `domain =` reference — with its registered
