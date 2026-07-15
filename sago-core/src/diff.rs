@@ -42,13 +42,27 @@ pub async fn diff_datasets_with_options(
     target_identifier: &str,
     rename_opts: &RenameOptions,
 ) -> Result<DiffReport> {
-    let source_schema = source_provider.get_schema(source_identifier).await?;
-    let target_schema = target_provider.get_schema(target_identifier).await?;
-
-    let mut schema_drift = detect_schema_drift(&source_schema, &target_schema);
-
     let source_data = source_provider.get_data(source_identifier).await?;
     let target_data = target_provider.get_data(target_identifier).await?;
+
+    // Derive each side's schema from the batches we already fetched rather
+    // than an independent get_schema() call: both S3SchemaProvider and
+    // PostgresSchemaProvider derive their schema from the same
+    // source (the Parquet/CSV/JSON bytes, or an information_schema query)
+    // that get_data() re-fetches internally, so calling get_schema() here
+    // too would double the S3 object download / Postgres metadata query for
+    // every diff. Only fall back to get_schema() when a dataset is empty
+    // (no batches to read a schema off of) — e.g. an empty Parquet file.
+    let source_schema = match source_data.first() {
+        Some(b) => b.schema().as_ref().clone(),
+        None => source_provider.get_schema(source_identifier).await?,
+    };
+    let target_schema = match target_data.first() {
+        Some(b) => b.schema().as_ref().clone(),
+        None => target_provider.get_schema(target_identifier).await?,
+    };
+
+    let mut schema_drift = detect_schema_drift(&source_schema, &target_schema);
 
     // Fold removed/added pairs that are actually renames into `renamed_fields`.
     let source_profiles = profile_columns_from_batches(&source_data);
@@ -109,6 +123,40 @@ mod tests {
         }
     }
 
+    /// Counts `get_schema` calls, for asserting `diff_datasets` derives the
+    /// schema from already-fetched batches instead of an independent fetch.
+    struct CountingProvider {
+        schema: Schema,
+        batches: Vec<RecordBatch>,
+        schema_calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl CountingProvider {
+        fn new(schema: Schema, batches: Vec<RecordBatch>) -> Arc<Self> {
+            Arc::new(Self {
+                schema,
+                batches,
+                schema_calls: std::sync::atomic::AtomicUsize::new(0),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl crate::SchemaProvider for CountingProvider {
+        async fn get_schema(&self, _identifier: &str) -> crate::Result<Schema> {
+            self.schema_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(self.schema.clone())
+        }
+    }
+
+    #[async_trait]
+    impl DataProvider for CountingProvider {
+        async fn get_data(&self, _identifier: &str) -> crate::Result<Vec<RecordBatch>> {
+            Ok(self.batches.clone())
+        }
+    }
+
     struct ErrorProvider;
 
     #[async_trait]
@@ -121,7 +169,7 @@ mod tests {
     #[async_trait]
     impl DataProvider for ErrorProvider {
         async fn get_data(&self, _identifier: &str) -> crate::Result<Vec<RecordBatch>> {
-            unreachable!()
+            Err(SagoError::Schema("table not found".to_string()))
         }
     }
 
@@ -342,5 +390,56 @@ mod tests {
             SagoError::Schema(_) => {}
             e => panic!("Expected Schema error, got: {:?}", e),
         }
+    }
+
+    #[tokio::test]
+    async fn test_diff_does_not_call_get_schema_when_data_present() {
+        // Regression: diff_datasets used to call get_schema() and get_data()
+        // independently, doubling network/DB cost for providers whose
+        // get_data() already returns the schema for free (both
+        // S3SchemaProvider and PostgresSchemaProvider redo a full
+        // fetch/query inside get_data() to build it). The schema must be
+        // derived from the already-fetched batches instead.
+        let schema = Arc::new(int32_schema("val"));
+        let batch = int32_batch(schema.clone(), vec![Some(1), Some(2)]);
+        let source = CountingProvider::new(schema.as_ref().clone(), vec![batch.clone()]);
+        let target = CountingProvider::new(schema.as_ref().clone(), vec![batch]);
+
+        diff_datasets(source.clone(), "s", target.clone(), "t")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            source.schema_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "get_schema must not be called when get_data already returned batches"
+        );
+        assert_eq!(
+            target.schema_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn test_diff_falls_back_to_get_schema_when_data_is_empty() {
+        // An empty dataset has no batch to read a schema off of, so
+        // diff_datasets must still fall back to get_schema() in that case
+        // (matching capture_snapshot's identical fallback in state.rs).
+        let schema = int32_schema("val");
+        let source = CountingProvider::new(schema.clone(), vec![]);
+        let target = CountingProvider::new(schema, vec![]);
+
+        diff_datasets(source.clone(), "s", target.clone(), "t")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            source.schema_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        assert_eq!(
+            target.schema_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
     }
 }
