@@ -1,4 +1,4 @@
-use arrow::array::{Array, StringArray};
+use arrow::array::{Array, ArrayRef, LargeStringArray, StringArray};
 use arrow::datatypes::DataType;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -27,6 +27,11 @@ static EMAIL_REGEX: LazyLock<Regex> = LazyLock::new(|| {
 static CREDIT_CARD_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^(?:4[0-9]{12}(?:[0-9]{3})?|5[1-5][0-9]{14}|3[47][0-9]{13}|3(?:0[0-5]|[68][0-9])[0-9]{11}|6(?:011|5[0-9]{2})[0-9]{12}|(?:2131|1800|35\d{3})\d{11})$").unwrap()
 });
+// E.164-shape check applied to the digits of a phone-looking value *after*
+// stripping common human formatting (spaces, hyphens, parens, dots) via
+// `strip_phone_formatting`, so both "+14155552671" and "+1 (415) 555-2671"
+// match while non-digit/non-formatting characters (letters, etc.) are
+// rejected before this regex ever runs.
 static PHONE_NUMBER_REGEX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^\+?[1-9]\d{1,14}$").unwrap());
 static UUID_REGEX: LazyLock<Regex> = LazyLock::new(|| {
@@ -47,6 +52,97 @@ static URL_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     )
     .unwrap()
 });
+
+/// Validates a credit-card-shaped digit string against the Luhn checksum, so
+/// e.g. an internally-generated ID that merely matches a card-number
+/// length/prefix pattern (like `CREDIT_CARD_REGEX`) isn't misclassified.
+fn passes_luhn(digits: &str) -> bool {
+    let mut sum = 0u32;
+    let mut double = false;
+    for c in digits.chars().rev() {
+        let Some(d) = c.to_digit(10) else {
+            return false;
+        };
+        let mut d = d;
+        if double {
+            d *= 2;
+            if d > 9 {
+                d -= 9;
+            }
+        }
+        sum += d;
+        double = !double;
+    }
+    sum.is_multiple_of(10)
+}
+
+/// Strips common human phone-number formatting (spaces, hyphens, parentheses)
+/// so values like "+1 (415) 555-2671" can be matched against
+/// `PHONE_NUMBER_REGEX`'s bare E.164 shape. Deliberately does *not* strip
+/// dots: a dotted-quad IPv4 address (e.g. "1.1.1.1") would otherwise collapse
+/// to a plain digit string and collide with the phone check. Returns `None`
+/// if the value contains any character outside the expected phone-formatting
+/// set (e.g. letters), so non-phone-shaped strings aren't stripped into a
+/// false match.
+fn strip_phone_formatting(value: &str) -> Option<String> {
+    let mut out = String::with_capacity(value.len());
+    for c in value.chars() {
+        match c {
+            '0'..='9' | '+' => out.push(c),
+            ' ' | '-' | '(' | ')' => {}
+            _ => return None,
+        }
+    }
+    Some(out)
+}
+
+/// True if `value` parses as a valid IPv6 address (e.g. `2001:db8::1`, `::1`).
+/// Delegates to `std::net::Ipv6Addr`'s parser rather than a hand-rolled regex,
+/// since IPv6's zero-compression (`::`) and mixed IPv4-suffix forms are easy
+/// to get subtly wrong by hand.
+fn is_ipv6(value: &str) -> bool {
+    value.parse::<std::net::Ipv6Addr>().is_ok()
+}
+
+/// Uniform read access over either a `Utf8` ([`StringArray`]) or `LargeUtf8`
+/// ([`LargeStringArray`]) column. `StringArray`'s offsets are `i32`, so
+/// `downcast_ref::<StringArray>()` always fails for a `LargeUtf8` column
+/// (backed by `LargeStringArray`, whose offsets are `i64`) — without this,
+/// data-based semantic inference silently never runs for LargeUtf8 columns.
+enum StringSampler<'a> {
+    Utf8(&'a StringArray),
+    LargeUtf8(&'a LargeStringArray),
+}
+
+impl<'a> StringSampler<'a> {
+    fn new(array: &'a dyn Array) -> Option<Self> {
+        match array.data_type() {
+            DataType::Utf8 => array
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .map(StringSampler::Utf8),
+            DataType::LargeUtf8 => array
+                .as_any()
+                .downcast_ref::<LargeStringArray>()
+                .map(StringSampler::LargeUtf8),
+            _ => None,
+        }
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            StringSampler::Utf8(a) => a.len(),
+            StringSampler::LargeUtf8(a) => a.len(),
+        }
+    }
+
+    fn value(&self, i: usize) -> Option<&'a str> {
+        match self {
+            StringSampler::Utf8(a) => (!a.is_null(i)).then(|| a.value(i)),
+            StringSampler::LargeUtf8(a) => (!a.is_null(i)).then(|| a.value(i)),
+        }
+    }
+}
 
 pub fn infer_semantic_type(column_name: &str, array: &dyn Array) -> SemanticType {
     let lower_name = column_name.to_lowercase();
@@ -80,9 +176,7 @@ pub fn infer_semantic_type(column_name: &str, array: &dyn Array) -> SemanticType
             .split(|c: char| !c.is_alphanumeric())
             .any(|seg| seg == "tel" || seg == "cell");
 
-    if (array.data_type() == &DataType::Utf8 || array.data_type() == &DataType::LargeUtf8)
-        && let Some(string_array) = array.as_any().downcast_ref::<StringArray>()
-    {
+    if let Some(sampler) = StringSampler::new(array) {
         let mut email_count = 0;
         let mut cc_count = 0;
         let mut phone_count = 0;
@@ -99,24 +193,25 @@ pub fn infer_semantic_type(column_name: &str, array: &dyn Array) -> SemanticType
         // `k` in `0..sample_size` lands on `sample_size` indices spread
         // evenly across `[0, len)` — and reduces to exactly `0..len` when
         // `len <= 100`, so short columns are checked in full as before.
-        let len = string_array.len();
+        let len = sampler.len();
         let sample_size = std::cmp::min(100, len);
 
         for k in 0..sample_size {
             let i = (k * len) / sample_size;
-            if !string_array.is_null(i) {
+            if let Some(val) = sampler.value(i) {
                 total_checked += 1;
-                let val = string_array.value(i);
 
                 if EMAIL_REGEX.is_match(val) {
                     email_count += 1;
-                } else if CREDIT_CARD_REGEX.is_match(val) {
+                } else if CREDIT_CARD_REGEX.is_match(val) && passes_luhn(val) {
                     cc_count += 1;
-                } else if PHONE_NUMBER_REGEX.is_match(val) {
+                } else if strip_phone_formatting(val)
+                    .is_some_and(|digits| PHONE_NUMBER_REGEX.is_match(&digits))
+                {
                     phone_count += 1;
                 } else if UUID_REGEX.is_match(val) {
                     uuid_count += 1;
-                } else if IP_ADDRESS_REGEX.is_match(val) {
+                } else if IP_ADDRESS_REGEX.is_match(val) || is_ipv6(val) {
                     ip_count += 1;
                 } else if URL_REGEX.is_match(val) {
                     url_count += 1;
@@ -149,6 +244,29 @@ pub fn infer_semantic_type(column_name: &str, array: &dyn Array) -> SemanticType
     }
 
     SemanticType::Unknown
+}
+
+/// Like [`infer_semantic_type`], but samples across *all* of `columns` instead
+/// of a single array. Callers with multiple `RecordBatch`es (any dataset with
+/// more rows than one reader batch — e.g. Arrow's default 1024-row batches)
+/// must use this rather than inferring from `batches[0]` alone: sampling only
+/// the first batch classifies the column from an arbitrary, unrepresentative
+/// slice instead of the data as a whole.
+pub fn infer_semantic_type_multi(column_name: &str, columns: &[ArrayRef]) -> SemanticType {
+    match columns.len() {
+        0 => SemanticType::Unknown,
+        1 => infer_semantic_type(column_name, columns[0].as_ref()),
+        _ => {
+            let refs: Vec<&dyn Array> = columns.iter().map(|c| c.as_ref()).collect();
+            match arrow::compute::concat(&refs) {
+                Ok(concatenated) => infer_semantic_type(column_name, concatenated.as_ref()),
+                // Concatenation only fails on a data-type mismatch across
+                // batches, which schema drift elsewhere already flags; fall
+                // back to the first batch rather than panicking.
+                Err(_) => infer_semantic_type(column_name, columns[0].as_ref()),
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -253,6 +371,24 @@ mod tests {
     }
 
     #[test]
+    fn test_credit_card_luhn_rejects_non_checksum_digits() {
+        // 16-digit strings starting with a Visa prefix ('4') but failing the
+        // Luhn checksum — e.g. internally-generated order IDs — must not be
+        // classified CreditCard just because they match the shape regex.
+        let array = StringArray::from(vec![
+            Some("4123456789012345"),
+            Some("4123456789012346"),
+            Some("4123456789012347"),
+            Some("4123456789012348"),
+            Some("4123456789012349"),
+        ]);
+        assert_eq!(
+            infer_semantic_type("order_id", &array),
+            SemanticType::Unknown
+        );
+    }
+
+    #[test]
     fn test_infer_by_data_phone_requires_name_hint() {
         let array = StringArray::from(vec![
             Some("+14155552671"),
@@ -271,6 +407,38 @@ mod tests {
         assert_eq!(
             infer_semantic_type("unknown_col", &array),
             SemanticType::Unknown
+        );
+    }
+
+    #[test]
+    fn test_infer_by_data_phone_with_common_formatting() {
+        // Real-world formatted numbers (spaces, dashes, parens) must still be
+        // recognized once the name hints at a phone column.
+        let array = StringArray::from(vec![
+            Some("+1 (415) 555-2671"),
+            Some("+44 20 7123 4567"),
+            Some("+33 1 23 45 67 89"),
+            Some("(415) 555-2672"),
+            Some("415-555-2673"),
+        ]);
+        assert_eq!(
+            infer_semantic_type("mobile", &array),
+            SemanticType::PhoneNumber
+        );
+    }
+
+    #[test]
+    fn test_infer_by_data_ipv6() {
+        let array = StringArray::from(vec![
+            Some("2001:db8::1"),
+            Some("::1"),
+            Some("fe80::1ff:fe23:4567:890a"),
+            Some("2001:db8:0:0:0:0:0:1"),
+            Some("::ffff:192.0.2.1"),
+        ]);
+        assert_eq!(
+            infer_semantic_type("source_addr", &array),
+            SemanticType::IPAddress
         );
     }
 
@@ -474,6 +642,22 @@ mod tests {
         assert_eq!(
             infer_semantic_type("unknown_col", &array),
             SemanticType::Unknown
+        );
+    }
+
+    #[test]
+    fn test_large_utf8_array_data_based_inference() {
+        // LargeUtf8 columns are backed by LargeStringArray, a distinct
+        // concrete type from StringArray — inference must still run for them.
+        let array = LargeStringArray::from(vec![
+            Some("test@example.com"),
+            Some("user@domain.org"),
+            None,
+            Some("another@email.net"),
+        ]);
+        assert_eq!(
+            infer_semantic_type("unknown_col", &array),
+            SemanticType::Email
         );
     }
 

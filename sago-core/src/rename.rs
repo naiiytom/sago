@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::drift::{ColumnStats, SchemaDrift, calculate_column_stats};
 use crate::schema_codec::serialize_data_type;
-use crate::semantic::{SemanticType, infer_semantic_type};
+use crate::semantic::{SemanticType, infer_semantic_type_multi};
 
 /// The signals about a single column that survive a rename and can therefore be
 /// used to re-identify it under a new name.
@@ -145,9 +145,8 @@ pub fn profile_columns(
 }
 
 /// Build a [`ColumnProfile`] for every column present in `batches`, inferring
-/// the semantic type from the first batch and computing distribution stats
-/// across all batches. This is the `diff` entry point, where full record
-/// batches are available.
+/// the semantic type and distribution stats across *all* batches. This is the
+/// `diff` entry point, where full record batches are available.
 pub fn profile_columns_from_batches(batches: &[RecordBatch]) -> HashMap<String, ColumnProfile> {
     let mut profiles = HashMap::new();
     let Some(first) = batches.first() else {
@@ -156,10 +155,15 @@ pub fn profile_columns_from_batches(batches: &[RecordBatch]) -> HashMap<String, 
     let schema = first.schema();
     for field in schema.fields() {
         let name = field.name();
-        let semantic_type = first
-            .column_by_name(name)
-            .map(|col| infer_semantic_type(name, col.as_ref()))
-            .unwrap_or(SemanticType::Unknown);
+        let cols: Vec<_> = batches
+            .iter()
+            .filter_map(|b| b.column_by_name(name).cloned())
+            .collect();
+        let semantic_type = if cols.is_empty() {
+            SemanticType::Unknown
+        } else {
+            infer_semantic_type_multi(name, &cols)
+        };
         profiles.insert(
             name.clone(),
             ColumnProfile {
@@ -218,43 +222,131 @@ pub fn refine_renames(
     drift.renamed_fields.extend(renames);
 }
 
-/// Score every removed×added pair and greedily select a deterministic 1:1
-/// set of renames whose confidence clears `opts.min_confidence`.
+/// Score every removed×added pair and solve the resulting bipartite matching
+/// for the 1:1 rename set that *maximizes total confidence*, rather than a
+/// greedy highest-confidence-first assignment (which can lock in a locally
+/// strong pair and force a much weaker one elsewhere, when the optimal
+/// assignment would have paired them the other way).
 fn match_renames(
     removed: &HashMap<&String, &ColumnProfile>,
     added: &HashMap<&String, &ColumnProfile>,
     opts: &RenameOptions,
 ) -> Vec<FieldRename> {
-    let mut candidates: Vec<FieldRename> = Vec::new();
-    for (from, from_profile) in removed {
-        for (to, to_profile) in added {
+    // Sorted name order fixes a canonical row/column index for the cost
+    // matrix, so the result is deterministic regardless of HashMap iteration
+    // order — matching the old greedy matcher's tie-breaking guarantee.
+    let mut removed_names: Vec<&String> = removed.keys().copied().collect();
+    let mut added_names: Vec<&String> = added.keys().copied().collect();
+    removed_names.sort();
+    added_names.sort();
+
+    let mut candidates: HashMap<(usize, usize), FieldRename> = HashMap::new();
+    for (i, from) in removed_names.iter().enumerate() {
+        let from_profile = removed[*from];
+        for (j, to) in added_names.iter().enumerate() {
+            let to_profile = added[*to];
             if let Some(rename) = score_pair(from, from_profile, to, to_profile, opts) {
-                candidates.push(rename);
+                candidates.insert((i, j), rename);
             }
         }
     }
 
-    // Deterministic order: highest confidence first, then by name so HashMap
-    // iteration order never changes the result.
-    candidates.sort_by(|a, b| {
-        b.confidence
-            .total_cmp(&a.confidence)
-            .then_with(|| a.from.cmp(&b.from))
-            .then_with(|| a.to.cmp(&b.to))
-    });
+    if candidates.is_empty() {
+        return Vec::new();
+    }
 
-    let mut used_from: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut used_to: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Hungarian algorithm requires rows <= columns; swap sides if needed and
+    // transpose the (row, col) key used to look candidates back up.
+    let (rows, cols, transposed) = if removed_names.len() <= added_names.len() {
+        (removed_names.len(), added_names.len(), false)
+    } else {
+        (added_names.len(), removed_names.len(), true)
+    };
+
+    // Cost = -confidence for an eligible pair (so minimizing cost maximizes
+    // confidence); 0 for an ineligible pair, i.e. exactly as attractive as
+    // leaving both columns unmatched, so the solver never manufactures a
+    // rename that score_pair itself rejected.
+    let mut cost = vec![vec![0.0f64; cols]; rows];
+    for (&(i, j), rename) in &candidates {
+        let (r, c) = if transposed { (j, i) } else { (i, j) };
+        cost[r][c] = -rename.confidence;
+    }
+
+    let assignment = hungarian_min_cost(&cost, rows, cols);
+
     let mut accepted = Vec::new();
-    for cand in candidates {
-        if used_from.contains(&cand.from) || used_to.contains(&cand.to) {
+    for (col, &row) in assignment.iter().enumerate().skip(1) {
+        if row == 0 {
             continue;
         }
-        used_from.insert(cand.from.clone());
-        used_to.insert(cand.to.clone());
-        accepted.push(cand);
+        let (i, j) = if transposed {
+            (col - 1, row - 1)
+        } else {
+            (row - 1, col - 1)
+        };
+        if let Some(rename) = candidates.get(&(i, j)) {
+            accepted.push(rename.clone());
+        }
     }
     accepted
+}
+
+/// Minimum-cost bipartite matching (Kuhn–Munkres / Hungarian algorithm, the
+/// classic `O(rows * cols^2)` potentials formulation) of every row to a
+/// distinct column, for a `rows`-by-`cols` cost matrix with `rows <= cols`.
+/// Returns `assignment` of length `cols + 1` (1-indexed by column): the
+/// 1-indexed row matched to column `j`, or `0` if column `j` is unmatched.
+/// Every row is guaranteed a match since `rows <= cols`.
+fn hungarian_min_cost(cost: &[Vec<f64>], rows: usize, cols: usize) -> Vec<usize> {
+    let mut u = vec![0.0f64; rows + 1];
+    let mut v = vec![0.0f64; cols + 1];
+    let mut p = vec![0usize; cols + 1];
+    let mut way = vec![0usize; cols + 1];
+
+    for i in 1..=rows {
+        p[0] = i;
+        let mut j0 = 0usize;
+        let mut minv = vec![f64::INFINITY; cols + 1];
+        let mut used = vec![false; cols + 1];
+        loop {
+            used[j0] = true;
+            let i0 = p[j0];
+            let mut delta = f64::INFINITY;
+            let mut j1 = 0usize;
+            for j in 1..=cols {
+                if !used[j] {
+                    let cur = cost[i0 - 1][j - 1] - u[i0] - v[j];
+                    if cur < minv[j] {
+                        minv[j] = cur;
+                        way[j] = j0;
+                    }
+                    if minv[j] < delta {
+                        delta = minv[j];
+                        j1 = j;
+                    }
+                }
+            }
+            for j in 0..=cols {
+                if used[j] {
+                    u[p[j]] += delta;
+                    v[j] -= delta;
+                } else {
+                    minv[j] -= delta;
+                }
+            }
+            j0 = j1;
+            if p[j0] == 0 {
+                break;
+            }
+        }
+        while j0 != 0 {
+            let j1 = way[j0];
+            p[j0] = p[j1];
+            j0 = j1;
+        }
+    }
+    p
 }
 
 /// Compute the rename confidence for a single (from, to) pair, or `None` if the
@@ -404,8 +496,13 @@ fn levenshtein(a: &str, b: &str) -> usize {
 }
 
 /// Distribution similarity in `[0, 1]` between two numeric columns, blending
-/// closeness of mean, min, max, and null ratio. Returns `None` if either side
-/// lacks a numeric mean (i.e. the column is non-numeric).
+/// closeness of mean, min, max, variance, and null ratio. Returns `None` if
+/// either side lacks a numeric mean (i.e. the column is non-numeric).
+///
+/// Variance is included alongside mean/min/max because those three alone
+/// cannot distinguish shape: a uniform distribution and a bimodal one can
+/// share an identical mean/min/max while looking nothing alike, which would
+/// otherwise score as maximally similar.
 fn stats_similarity(a: &ColumnStats, b: &ColumnStats) -> Option<f64> {
     let (a_mean, b_mean) = (a.mean?, b.mean?);
 
@@ -418,6 +515,10 @@ fn stats_similarity(a: &ColumnStats, b: &ColumnStats) -> Option<f64> {
     }
     if let (Some(a_max), Some(b_max)) = (a.max, b.max) {
         sum += relative_closeness(a_max, b_max);
+        count += 1.0;
+    }
+    if let (Some(a_var), Some(b_var)) = (a.variance, b.variance) {
+        sum += relative_closeness(a_var, b_var);
         count += 1.0;
     }
 
@@ -474,6 +575,21 @@ mod tests {
             mean: Some(mean),
             min: Some(min),
             max: Some(max),
+            variance: None,
+        }
+    }
+
+    fn stats_with_variance(
+        null: usize,
+        rows: usize,
+        mean: f64,
+        min: f64,
+        max: f64,
+        variance: f64,
+    ) -> ColumnStats {
+        ColumnStats {
+            variance: Some(variance),
+            ..stats(null, rows, mean, min, max)
         }
     }
 
@@ -560,8 +676,38 @@ mod tests {
             mean: None,
             min: None,
             max: None,
+            variance: None,
         };
         assert!(stats_similarity(&a, &a).is_none());
+    }
+
+    #[test]
+    fn test_stats_similarity_distinguishes_shape_via_variance() {
+        // Same mean/min/max/null-ratio, very different variance (shape):
+        // `a` is a tight cluster around the mean, `b` is spread to the
+        // extremes. Without variance these would score identically (1.0);
+        // with it, the mismatch pulls the score down.
+        let a = stats_with_variance(0, 100, 50.0, 0.0, 100.0, 5.0);
+        let b = stats_with_variance(0, 100, 50.0, 0.0, 100.0, 2500.0);
+        let same_shape = stats_with_variance(0, 100, 50.0, 0.0, 100.0, 5.0);
+
+        let mismatched = stats_similarity(&a, &b).unwrap();
+        let matched = stats_similarity(&a, &same_shape).unwrap();
+        assert!(
+            mismatched < matched,
+            "mismatched variance ({mismatched}) should score lower than matched ({matched})"
+        );
+        assert!((matched - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_stats_similarity_missing_variance_on_either_side_is_ignored() {
+        // If either side lacks variance (e.g. an old persisted snapshot),
+        // the signal is skipped rather than treated as maximally dissimilar.
+        let with_var = stats_with_variance(0, 100, 50.0, 0.0, 100.0, 10.0);
+        let without_var = stats(0, 100, 50.0, 0.0, 100.0);
+        let s = stats_similarity(&with_var, &without_var).unwrap();
+        assert!((s - 1.0).abs() < 1e-9);
     }
 
     #[test]
@@ -751,6 +897,69 @@ mod tests {
             .collect();
         assert!(pairs.contains(&("user_email".to_string(), "email_addr".to_string())));
         assert!(pairs.contains(&("user_phone".to_string(), "phone_no".to_string())));
+    }
+
+    // ── optimal (Hungarian) vs. greedy assignment ────────────────────────────
+
+    #[test]
+    fn test_hungarian_finds_optimal_not_greedy_assignment() {
+        // removed={A,B}, added={X,Y}, confidences:
+        //   score(A,X)=0.90  score(A,Y)=0.85
+        //   score(B,X)=0.86  score(B,Y)=0.50
+        // A greedy highest-confidence-first matcher picks (A,X) first (the
+        // global max), which locks X and forces (B,Y)=0.50 for a total of
+        // 1.40. The optimal assignment is (A,Y)+(B,X) = 0.85+0.86 = 1.71 —
+        // strictly better, and unreachable by greedy since it never revisits
+        // the (A,X) choice once made.
+        let cost = vec![vec![-0.90, -0.85], vec![-0.86, -0.50]];
+        let assignment = hungarian_min_cost(&cost, 2, 2);
+
+        // assignment[col] = 1-indexed row matched to that column.
+        let matched_pairs: Vec<(usize, usize)> = (1..=2)
+            .filter(|&col| assignment[col] != 0)
+            .map(|col| (assignment[col] - 1, col - 1))
+            .collect();
+        let total: f64 = matched_pairs.iter().map(|&(r, c)| -cost[r][c]).sum();
+
+        assert_eq!(matched_pairs.len(), 2);
+        assert!(
+            (total - 1.71).abs() < 1e-9,
+            "expected optimal total 1.71, got {total} from {matched_pairs:?}"
+        );
+        // The optimal pairing is exactly (A,Y)+(B,X) — row 0 (A) with col 1
+        // (Y), row 1 (B) with col 0 (X) — NOT the greedy (A,X)+(B,Y).
+        assert!(matched_pairs.contains(&(0, 1)));
+        assert!(matched_pairs.contains(&(1, 0)));
+    }
+
+    #[test]
+    fn test_match_renames_all_pairs_below_confidence_yields_no_renames() {
+        // Sanity check that match_renames (now backed by the Hungarian
+        // solver) still returns nothing when no candidate clears
+        // min_confidence, matching the old greedy matcher's behavior for the
+        // "no eligible pairs" case.
+        let mut removed = HashMap::new();
+        removed.insert(
+            "price".to_string(),
+            profile(
+                "Int64",
+                SemanticType::Unknown,
+                Some(stats(0, 100, 5.0, 1.0, 9.0)),
+            ),
+        );
+        let mut added = HashMap::new();
+        added.insert(
+            "population".to_string(),
+            profile(
+                "Int64",
+                SemanticType::Unknown,
+                Some(stats(0, 100, 9000.0, 8000.0, 10000.0)),
+            ),
+        );
+        let removed_refs: HashMap<&String, &ColumnProfile> = removed.iter().collect();
+        let added_refs: HashMap<&String, &ColumnProfile> = added.iter().collect();
+        let renames = match_renames(&removed_refs, &added_refs, &RenameOptions::default());
+        assert!(renames.is_empty());
     }
 
     #[test]
