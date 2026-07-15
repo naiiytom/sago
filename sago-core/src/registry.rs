@@ -11,12 +11,14 @@
 
 use std::collections::BTreeSet;
 
-use crate::config::Config;
+use serde::{Deserialize, Serialize};
+
+use crate::config::{Config, normalize_domain_name};
 
 /// A domain known to this project, either because it has a `[domains.<name>]`
 /// entry, or because at least one target declares it via `domain = "..."` (or
 /// both).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DomainInfo {
     pub name: String,
     /// The `SagoService` endpoint from `[domains.<name>].endpoint`, if this
@@ -42,26 +44,54 @@ pub struct DomainInfo {
 /// registered-but-undocumented domain as worth surfacing, not silently
 /// dropping.
 pub fn list_domains(cfg: &Config) -> Vec<DomainInfo> {
-    let mut names: BTreeSet<&str> = cfg.domains.keys().map(String::as_str).collect();
-    names.extend(cfg.targets.values().filter_map(|t| t.domain.as_deref()));
+    // Group by *normalized* name so a target's `domain = "sales"` and a
+    // declared `[domains.Sales]` collapse into one entry instead of
+    // appearing as two unrelated domains (one with a RBAC entry and zero
+    // targets, one with targets and no visible entry) purely due to casing.
+    let mut normalized_names: BTreeSet<String> =
+        cfg.domains.keys().map(|n| normalize_domain_name(n)).collect();
+    normalized_names.extend(
+        cfg.targets
+            .values()
+            .filter_map(|t| t.domain.as_deref())
+            .map(normalize_domain_name),
+    );
 
-    names
+    let mut infos: Vec<DomainInfo> = normalized_names
         .into_iter()
-        .map(|name| {
-            let entry = cfg.domains.get(name);
+        .map(|normalized| {
+            let entry = cfg.find_domain(&normalized);
+            // Prefer the declared entry's actual key for display; fall back
+            // to whatever casing a target used if there's no entry at all.
+            let display_name = entry.map(|(name, _)| name.to_string()).unwrap_or_else(|| {
+                cfg.targets
+                    .values()
+                    .filter_map(|t| t.domain.as_deref())
+                    .find(|d| normalize_domain_name(d) == normalized)
+                    .unwrap_or(&normalized)
+                    .to_string()
+            });
             DomainInfo {
-                name: name.to_string(),
-                endpoint: entry.and_then(|d| d.endpoint.clone()),
-                operator_count: entry.map_or(0, |d| d.operators.len()),
+                name: display_name,
+                endpoint: entry.and_then(|(_, d)| d.endpoint.clone()),
+                operator_count: entry.map_or(0, |(_, d)| d.operators.len()),
                 target_count: cfg
                     .targets
                     .values()
-                    .filter(|t| t.domain.as_deref() == Some(name))
+                    .filter(|t| {
+                        t.domain
+                            .as_deref()
+                            .map(normalize_domain_name)
+                            .as_deref()
+                            == Some(normalized.as_str())
+                    })
                     .count(),
                 has_domain_entry: entry.is_some(),
             }
         })
-        .collect()
+        .collect();
+    infos.sort_by(|a, b| a.name.cmp(&b.name));
+    infos
 }
 
 /// Why [`resolve_endpoint`] could not return an endpoint.
@@ -95,19 +125,19 @@ impl std::fmt::Display for ResolveError {
 /// `sago federate` grouping is a legitimate config, so the two failure modes
 /// are distinguished rather than collapsed into one "not found".
 pub fn resolve_endpoint<'a>(cfg: &'a Config, domain: &str) -> Result<&'a str, ResolveError> {
-    let known = cfg.domains.contains_key(domain)
+    let normalized = normalize_domain_name(domain);
+    let known = cfg.find_domain(domain).is_some()
         || cfg
             .targets
             .values()
-            .any(|t| t.domain.as_deref() == Some(domain));
+            .any(|t| t.domain.as_deref().map(normalize_domain_name).as_deref() == Some(normalized.as_str()));
     if !known {
         return Err(ResolveError::UnknownDomain {
             domain: domain.to_string(),
         });
     }
-    cfg.domains
-        .get(domain)
-        .and_then(|d| d.endpoint.as_deref())
+    cfg.find_domain(domain)
+        .and_then(|(_, d)| d.endpoint.as_deref())
         .ok_or_else(|| ResolveError::NoEndpoint {
             domain: domain.to_string(),
         })
@@ -212,6 +242,39 @@ endpoint = "http://sales.internal:50051"
     }
 
     #[test]
+    fn test_list_domains_collapses_case_mismatch_with_target() {
+        // Regression: a target's `domain = "sales"` (lowercase) and a
+        // declared `[domains.Sales]` (capital S) must collapse into ONE
+        // DomainInfo with both the RBAC entry and the target counted,
+        // instead of appearing as two unrelated domains.
+        let cfg = config(
+            r#"
+[domains.Sales]
+operators = ["alice"]
+endpoint = "http://sales.internal:50051"
+"#,
+        );
+        let domains = list_domains(&cfg);
+        let matches: Vec<&DomainInfo> = domains
+            .iter()
+            .filter(|d| d.name.eq_ignore_ascii_case("sales"))
+            .collect();
+        assert_eq!(
+            matches.len(),
+            1,
+            "expected exactly one collapsed entry, got {domains:?}"
+        );
+        let sales = matches[0];
+        assert!(sales.has_domain_entry);
+        assert_eq!(sales.operator_count, 1);
+        assert_eq!(sales.target_count, 1);
+        assert_eq!(
+            sales.endpoint.as_deref(),
+            Some("http://sales.internal:50051")
+        );
+    }
+
+    #[test]
     fn test_list_domains_entry_with_no_targets_still_appears() {
         // A domain declared purely for future use, with no target tagged yet.
         let cfg = config(
@@ -252,6 +315,24 @@ endpoint = "http://sales.internal:50051"
         );
         assert_eq!(
             resolve_endpoint(&cfg, "sales"),
+            Ok("http://sales.internal:50051")
+        );
+    }
+
+    #[test]
+    fn test_resolve_endpoint_case_insensitive_lookup() {
+        let cfg = config(
+            r#"
+[domains.Sales]
+endpoint = "http://sales.internal:50051"
+"#,
+        );
+        assert_eq!(
+            resolve_endpoint(&cfg, "sales"),
+            Ok("http://sales.internal:50051")
+        );
+        assert_eq!(
+            resolve_endpoint(&cfg, "SALES"),
             Ok("http://sales.internal:50051")
         );
     }
