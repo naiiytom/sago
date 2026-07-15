@@ -13,7 +13,9 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use crate::report::{OutputFormat, default_artifact_path, print_json, print_terminal, write_artifact};
+use crate::report::{
+    OutputFormat, default_artifact_path, print_json, print_terminal, write_artifact,
+};
 
 /// Number of numeric values to retain per column when sampling the live dataset
 /// for the PSI drift metric. Shares the config default so live and baseline

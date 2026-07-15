@@ -342,20 +342,16 @@ pub fn detect_data_drift(
 
     for field_name in common_field_names(&source_schema, &target_schema) {
         let field_name = field_name.as_str();
-        let (source_null_count, source_row_count) = match null_and_row_count(
-            source_batches,
-            field_name,
-        ) {
-            Some(v) => v,
-            None => continue,
-        };
-        let (target_null_count, target_row_count) = match null_and_row_count(
-            target_batches,
-            field_name,
-        ) {
-            Some(v) => v,
-            None => continue,
-        };
+        let (source_null_count, source_row_count) =
+            match null_and_row_count(source_batches, field_name) {
+                Some(v) => v,
+                None => continue,
+            };
+        let (target_null_count, target_row_count) =
+            match null_and_row_count(target_batches, field_name) {
+                Some(v) => v,
+                None => continue,
+            };
 
         // Extract each side's numeric values exactly once, then derive
         // mean/min/max/variance from that same extraction (numeric_summary)
@@ -401,7 +397,8 @@ pub fn detect_data_drift(
         tgt_sorted.sort_by(|a, b| a.total_cmp(b));
         let (ks_statistic, ks_p_value) = ks_from_sorted(&src_sorted, &tgt_sorted);
 
-        let categorical_drift = detect_categorical_drift(source_batches, target_batches, field_name);
+        let categorical_drift =
+            detect_categorical_drift(source_batches, target_batches, field_name);
 
         column_drifts.insert(
             field_name.to_string(),
@@ -984,7 +981,11 @@ mod tests {
         );
         let email_batch_2 = email_batch_1.clone();
 
-        let source = vec![junk_batch.clone(), email_batch_1.clone(), email_batch_2.clone()];
+        let source = vec![
+            junk_batch.clone(),
+            email_batch_1.clone(),
+            email_batch_2.clone(),
+        ];
         let target = vec![junk_batch, email_batch_1, email_batch_2];
 
         let result = detect_semantic_drift(&source, &target);
@@ -1283,7 +1284,9 @@ mod tests {
         );
         let drift = detect_data_drift(&[b1], &[b2]);
         let col = drift.column_drifts.get("status").unwrap();
-        let psi = col.categorical_drift.expect("string column should get categorical_drift");
+        let psi = col
+            .categorical_drift
+            .expect("string column should get categorical_drift");
         assert!(psi.abs() < 1e-9, "expected ~0 PSI, got {psi}");
     }
 
@@ -1302,7 +1305,9 @@ mod tests {
         let b2 = str_batch("status", target_vals);
         let drift = detect_data_drift(&[b1], &[b2]);
         let col = drift.column_drifts.get("status").unwrap();
-        let psi = col.categorical_drift.expect("string column should get categorical_drift");
+        let psi = col
+            .categorical_drift
+            .expect("string column should get categorical_drift");
         assert!(psi > 0.25, "expected a major shift, got psi={psi}");
         assert!(col.breaches_threshold(0.25));
     }

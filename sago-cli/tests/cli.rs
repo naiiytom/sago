@@ -508,7 +508,13 @@ fn test_log_level_accepted_after_subcommand() {
     std::fs::write(tmp.path().join("Sago.toml"), SAMPLE_TOML).unwrap();
     Command::cargo_bin("sago")
         .unwrap()
-        .args(["apply", "--log-level", "debug", "--target", "no_such_target"])
+        .args([
+            "apply",
+            "--log-level",
+            "debug",
+            "--target",
+            "no_such_target",
+        ])
         .current_dir(tmp.path())
         .assert()
         .failure() // still fails on the typo'd target — but NOT a clap arg-parsing error
@@ -521,7 +527,13 @@ fn test_log_level_still_accepted_before_subcommand() {
     std::fs::write(tmp.path().join("Sago.toml"), SAMPLE_TOML).unwrap();
     Command::cargo_bin("sago")
         .unwrap()
-        .args(["--log-level", "debug", "apply", "--target", "no_such_target"])
+        .args([
+            "--log-level",
+            "debug",
+            "apply",
+            "--target",
+            "no_such_target",
+        ])
         .current_dir(tmp.path())
         .assert()
         .failure()
@@ -757,9 +769,8 @@ fn test_domains_format_json_outputs_valid_array() {
 
 #[test]
 fn test_domains_with_targets_filter_excludes_empty_domains() {
-    let toml = format!(
-        "{MESH_TOML}\n[domains.marketing]\nendpoint = \"http://marketing.internal:1\"\n"
-    );
+    let toml =
+        format!("{MESH_TOML}\n[domains.marketing]\nendpoint = \"http://marketing.internal:1\"\n");
     let tmp = tempfile::tempdir().unwrap();
     std::fs::write(tmp.path().join("Sago.toml"), toml).unwrap();
     let out = Command::cargo_bin("sago")

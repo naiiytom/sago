@@ -162,7 +162,10 @@ impl sago_service_server::SagoService for ProviderService {
                 }
             }
         }
-        Ok(Response::new(v1::GetInclusionProofsResponse { proofs, found }))
+        Ok(Response::new(v1::GetInclusionProofsResponse {
+            proofs,
+            found,
+        }))
     }
 }
 
@@ -330,13 +333,12 @@ where
             .leaf(i)
             .expect("i < local.leaf_count() by the min() above");
 
-        let remote_leaf =
-            sago_core::merkle::from_hex(&proof_resp.leaf_hex).ok_or_else(|| {
-                Status::internal(format!(
-                    "server returned malformed leaf hash: {}",
-                    proof_resp.leaf_hex
-                ))
-            })?;
+        let remote_leaf = sago_core::merkle::from_hex(&proof_resp.leaf_hex).ok_or_else(|| {
+            Status::internal(format!(
+                "server returned malformed leaf hash: {}",
+                proof_resp.leaf_hex
+            ))
+        })?;
 
         let proof = sago_core::merkle::InclusionProof {
             leaf_index: i,
@@ -546,9 +548,7 @@ pub fn proto_to_schema(s: &v1::Schema) -> Result<arrow::datatypes::Schema, Proto
 /// [`sago_core::semantic::SemanticType`]. prost generates a safe,
 /// range-checked `TryFrom<i32>` for proto3 enums, so an out-of-range value
 /// from a newer/buggy server is rejected rather than reinterpreted.
-pub fn proto_to_semantic(
-    v: i32,
-) -> Result<sago_core::semantic::SemanticType, ProtoConvertError> {
+pub fn proto_to_semantic(v: i32) -> Result<sago_core::semantic::SemanticType, ProtoConvertError> {
     use sago_core::semantic::SemanticType as S;
     match v1::SemanticType::try_from(v) {
         Ok(v1::SemanticType::Unknown) | Ok(v1::SemanticType::Unspecified) => Ok(S::Unknown),
@@ -631,30 +631,26 @@ fn proto_to_data_drift(d: &v1::DataDrift) -> sago_core::drift::DataDrift {
                 (
                     name.clone(),
                     sago_core::drift::ColumnDrift {
-                        source_stats: c
-                            .source_stats
-                            .as_ref()
-                            .map(proto_to_stats)
-                            .unwrap_or(sago_core::drift::ColumnStats {
+                        source_stats: c.source_stats.as_ref().map(proto_to_stats).unwrap_or(
+                            sago_core::drift::ColumnStats {
                                 null_count: 0,
                                 row_count: 0,
                                 mean: None,
                                 min: None,
                                 max: None,
                                 variance: None,
-                            }),
-                        target_stats: c
-                            .target_stats
-                            .as_ref()
-                            .map(proto_to_stats)
-                            .unwrap_or(sago_core::drift::ColumnStats {
+                            },
+                        ),
+                        target_stats: c.target_stats.as_ref().map(proto_to_stats).unwrap_or(
+                            sago_core::drift::ColumnStats {
                                 null_count: 0,
                                 row_count: 0,
                                 mean: None,
                                 min: None,
                                 max: None,
                                 variance: None,
-                            }),
+                            },
+                        ),
                         mean_drift: c.mean_drift,
                         null_count_drift: c.null_count_drift,
                         ks_statistic: c.ks_statistic,
@@ -756,7 +752,11 @@ mod tests {
         // Decimal128 is now in schema_codec's whitelist (added alongside the
         // Postgres numeric-precision mapping fix), so it must round-trip
         // through the gRPC schema conversion too.
-        let schema = Schema::new(vec![Field::new("price", DataType::Decimal128(10, 2), false)]);
+        let schema = Schema::new(vec![Field::new(
+            "price",
+            DataType::Decimal128(10, 2),
+            false,
+        )]);
         let p = schema_to_proto(&schema).unwrap();
         assert_eq!(p.fields[0].data_type, "Decimal128(10, 2)");
     }
