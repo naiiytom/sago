@@ -410,12 +410,16 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            source.schema_calls.load(std::sync::atomic::Ordering::SeqCst),
+            source
+                .schema_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
             0,
             "get_schema must not be called when get_data already returned batches"
         );
         assert_eq!(
-            target.schema_calls.load(std::sync::atomic::Ordering::SeqCst),
+            target
+                .schema_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
             0
         );
     }
@@ -434,11 +438,15 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            source.schema_calls.load(std::sync::atomic::Ordering::SeqCst),
+            source
+                .schema_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
             1
         );
         assert_eq!(
-            target.schema_calls.load(std::sync::atomic::Ordering::SeqCst),
+            target
+                .schema_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
             1
         );
     }

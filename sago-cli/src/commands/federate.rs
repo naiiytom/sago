@@ -10,7 +10,9 @@ use std::process::ExitCode;
 use crate::commands::plan::{
     TargetReport, build_target_reports, collect_breaches, load_config, resolve_rename_threshold,
 };
-use crate::report::{OutputFormat, default_artifact_path, print_json, print_terminal_to, write_artifact};
+use crate::report::{
+    OutputFormat, default_artifact_path, print_json, print_terminal_to, write_artifact,
+};
 
 #[derive(Args, Debug)]
 pub struct FederateArgs {

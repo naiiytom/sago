@@ -8,7 +8,9 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use crate::commands::plan::{collect_breaches, resolve_rename_threshold};
-use crate::report::{OutputFormat, default_artifact_path, print_json, print_terminal, write_artifact};
+use crate::report::{
+    OutputFormat, default_artifact_path, print_json, print_terminal, write_artifact,
+};
 
 #[derive(Args, Debug)]
 pub struct DiffArgs {

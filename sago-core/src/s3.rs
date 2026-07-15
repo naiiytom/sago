@@ -396,7 +396,8 @@ mod tests {
         // Regression: a `.json` export shaped as a single top-level array
         // (a common REST/API dump convention) must be usable by the
         // line-oriented NDJSON reader after normalization.
-        let array_json = Bytes::from(b"[{\"id\":1,\"name\":\"a\"},{\"id\":2,\"name\":\"b\"}]".as_slice());
+        let array_json =
+            Bytes::from(b"[{\"id\":1,\"name\":\"a\"},{\"id\":2,\"name\":\"b\"}]".as_slice());
         let normalized = normalize_json_bytes(&array_json);
         let schema = schema_from_json(&normalized).unwrap();
         assert!(schema.field_with_name("id").is_ok());
@@ -438,8 +439,10 @@ mod tests {
             store
                 .put(
                     &Path::from("export.json"),
-                    Bytes::from(b"[{\"id\":1,\"name\":\"a\"},{\"id\":2,\"name\":\"b\"}]".as_slice())
-                        .into(),
+                    Bytes::from(
+                        b"[{\"id\":1,\"name\":\"a\"},{\"id\":2,\"name\":\"b\"}]".as_slice(),
+                    )
+                    .into(),
                 )
                 .await
                 .unwrap();

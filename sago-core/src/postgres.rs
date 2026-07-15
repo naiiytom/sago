@@ -660,19 +660,11 @@ mod tests {
     #[test]
     fn test_numeric_with_precision_and_scale_maps_to_decimal128() {
         assert_eq!(
-            PostgresSchemaProvider::map_postgres_type_with_precision(
-                "numeric",
-                Some(38),
-                Some(10)
-            ),
+            PostgresSchemaProvider::map_postgres_type_with_precision("numeric", Some(38), Some(10)),
             DataType::Decimal128(38, 10)
         );
         assert_eq!(
-            PostgresSchemaProvider::map_postgres_type_with_precision(
-                "decimal",
-                Some(10),
-                Some(2)
-            ),
+            PostgresSchemaProvider::map_postgres_type_with_precision("decimal", Some(10), Some(2)),
             DataType::Decimal128(10, 2)
         );
     }
@@ -702,11 +694,8 @@ mod tests {
     #[test]
     fn test_decimal128_round_trips_through_state_codec() {
         use crate::schema_codec::{parse_data_type, serialize_data_type};
-        let dt = PostgresSchemaProvider::map_postgres_type_with_precision(
-            "numeric",
-            Some(38),
-            Some(10),
-        );
+        let dt =
+            PostgresSchemaProvider::map_postgres_type_with_precision("numeric", Some(38), Some(10));
         let s = serialize_data_type(&dt);
         let back = parse_data_type(&s).unwrap();
         assert_eq!(back, dt);

@@ -548,7 +548,12 @@ mod tests {
         )]);
 
         let result = three_way_merge(&base, &ours, &theirs);
-        assert_eq!(result.conflicts.len(), 1, "conflicts: {:?}", result.conflicts);
+        assert_eq!(
+            result.conflicts.len(),
+            1,
+            "conflicts: {:?}",
+            result.conflicts
+        );
         assert_eq!(result.conflicts[0].field_name, "amount");
         assert_eq!(result.conflicts[0].kind, ConflictKind::ModifyModify);
         // Merged keeps `ours` so metadata isn't silently lost even on conflict.
@@ -638,7 +643,12 @@ mod tests {
         let theirs = schema_with_meta(vec![f("id", DataType::Int64, false)], "owner", "team-b");
 
         let result = three_way_merge(&base, &ours, &theirs);
-        assert_eq!(result.conflicts.len(), 1, "conflicts: {:?}", result.conflicts);
+        assert_eq!(
+            result.conflicts.len(),
+            1,
+            "conflicts: {:?}",
+            result.conflicts
+        );
         assert_eq!(
             result.conflicts[0].kind,
             ConflictKind::SchemaMetadataModifyModify

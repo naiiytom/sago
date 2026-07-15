@@ -48,8 +48,11 @@ pub fn list_domains(cfg: &Config) -> Vec<DomainInfo> {
     // declared `[domains.Sales]` collapse into one entry instead of
     // appearing as two unrelated domains (one with a RBAC entry and zero
     // targets, one with targets and no visible entry) purely due to casing.
-    let mut normalized_names: BTreeSet<String> =
-        cfg.domains.keys().map(|n| normalize_domain_name(n)).collect();
+    let mut normalized_names: BTreeSet<String> = cfg
+        .domains
+        .keys()
+        .map(|n| normalize_domain_name(n))
+        .collect();
     normalized_names.extend(
         cfg.targets
             .values()
@@ -79,10 +82,7 @@ pub fn list_domains(cfg: &Config) -> Vec<DomainInfo> {
                     .targets
                     .values()
                     .filter(|t| {
-                        t.domain
-                            .as_deref()
-                            .map(normalize_domain_name)
-                            .as_deref()
+                        t.domain.as_deref().map(normalize_domain_name).as_deref()
                             == Some(normalized.as_str())
                     })
                     .count(),
@@ -127,10 +127,9 @@ impl std::fmt::Display for ResolveError {
 pub fn resolve_endpoint<'a>(cfg: &'a Config, domain: &str) -> Result<&'a str, ResolveError> {
     let normalized = normalize_domain_name(domain);
     let known = cfg.find_domain(domain).is_some()
-        || cfg
-            .targets
-            .values()
-            .any(|t| t.domain.as_deref().map(normalize_domain_name).as_deref() == Some(normalized.as_str()));
+        || cfg.targets.values().any(|t| {
+            t.domain.as_deref().map(normalize_domain_name).as_deref() == Some(normalized.as_str())
+        });
     if !known {
         return Err(ResolveError::UnknownDomain {
             domain: domain.to_string(),
