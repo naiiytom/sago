@@ -91,9 +91,19 @@ pub fn infer_semantic_type(column_name: &str, array: &dyn Array) -> SemanticType
         let mut url_count = 0;
         let mut total_checked = 0;
 
-        let check_limit = std::cmp::min(100, string_array.len());
+        // Sample up to 100 values spread evenly across the column rather than
+        // just its prefix: a column whose front happens to be homogeneous
+        // (sorted data, a batch boundary, garbage padding at the start) would
+        // otherwise bias classification toward that prefix's composition
+        // instead of the column as a whole. `(k * len) / sample_size` for
+        // `k` in `0..sample_size` lands on `sample_size` indices spread
+        // evenly across `[0, len)` — and reduces to exactly `0..len` when
+        // `len <= 100`, so short columns are checked in full as before.
+        let len = string_array.len();
+        let sample_size = std::cmp::min(100, len);
 
-        for i in 0..check_limit {
+        for k in 0..sample_size {
+            let i = (k * len) / sample_size;
             if !string_array.is_null(i) {
                 total_checked += 1;
                 let val = string_array.value(i);
@@ -412,6 +422,35 @@ mod tests {
             Some("not-an-email"),
             Some("not-an-email"),
         ]);
+        assert_eq!(
+            infer_semantic_type("unknown_col", &array),
+            SemanticType::Email
+        );
+    }
+
+    // ── sampling spread ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_sampling_is_spread_not_just_prefix() {
+        // 1000 rows: first 100 are junk, the remaining 900 are emails. A
+        // prefix-only sample (the first 100 rows) would see 0% emails and
+        // return Unknown; a sample spread evenly across the whole column
+        // lands ~90% of its 100 picks past index 100, clearing the 80%
+        // threshold and correctly classifying the column as Email.
+        let mut values: Vec<Option<&str>> = vec![Some("not-an-email"); 100];
+        values.extend(std::iter::repeat_n(Some("user@example.com"), 900));
+        let array = StringArray::from(values);
+        assert_eq!(
+            infer_semantic_type("unknown_col", &array),
+            SemanticType::Email
+        );
+    }
+
+    #[test]
+    fn test_sampling_covers_full_short_column() {
+        // A column no longer than the sample size (100) must still be
+        // checked in full, matching the pre-fix behaviour for small data.
+        let array = StringArray::from(vec![Some("user@example.com"); 50]);
         assert_eq!(
             infer_semantic_type("unknown_col", &array),
             SemanticType::Email
