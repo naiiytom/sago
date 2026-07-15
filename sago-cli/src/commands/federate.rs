@@ -10,7 +10,7 @@ use std::process::ExitCode;
 use crate::commands::plan::{
     TargetReport, build_target_reports, collect_breaches, load_config, resolve_rename_threshold,
 };
-use crate::report::{default_artifact_path, print_terminal_to, write_artifact};
+use crate::report::{OutputFormat, default_artifact_path, print_json, print_terminal_to, write_artifact};
 
 #[derive(Args, Debug)]
 pub struct FederateArgs {
@@ -27,6 +27,11 @@ pub struct FederateArgs {
     /// (default: checks.rename_confidence_threshold from Sago.toml).
     #[arg(long)]
     pub rename_threshold: Option<f64>,
+
+    /// Output format: human-readable text grouped by domain (default), or
+    /// a flat JSON array of reports on stdout.
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    pub format: OutputFormat,
 }
 
 pub async fn run(args: &FederateArgs) -> Result<ExitCode> {
@@ -54,16 +59,39 @@ pub async fn run(args: &FederateArgs) -> Result<ExitCode> {
         build_target_reports(&cfg, &state, None, args.domain.as_deref(), &rename_opts).await?;
 
     if target_reports.is_empty() {
-        match &args.domain {
-            Some(d) => println!("nothing to federate (no targets in domain '{d}')"),
-            None => println!("nothing to federate (no targets configured)"),
+        if let Some(d) = &args.domain {
+            // Distinguish "typo'd/unknown domain name" from "a real domain
+            // that simply has zero targets right now" — sago domains already
+            // has the vocabulary for this (list_domains), so reuse it rather
+            // than reporting the same message for both cases.
+            let known = sago_core::registry::list_domains(&cfg)
+                .iter()
+                .any(|info| info.name.eq_ignore_ascii_case(d));
+            if !known {
+                anyhow::bail!(
+                    "'{d}' is not a known domain (checked Sago.toml's [domains.*] entries and every target's `domain =`)"
+                );
+            }
+        }
+        if args.format == OutputFormat::Json {
+            print_json(&[])?;
+        } else {
+            match &args.domain {
+                Some(d) => println!("nothing to federate (no targets in domain '{d}')"),
+                None => println!("nothing to federate (no targets configured)"),
+            }
         }
         return Ok(ExitCode::SUCCESS);
     }
 
-    print_federated(&target_reports);
-
     let reports: Vec<DiffReport> = target_reports.iter().map(|tr| tr.report.clone()).collect();
+
+    if args.format == OutputFormat::Json {
+        print_json(&reports)?;
+    } else {
+        print_federated(&target_reports);
+    }
+
     let breaches = collect_breaches(&reports, threshold);
 
     let out = args.out.clone().unwrap_or_else(default_artifact_path);

@@ -16,7 +16,7 @@ description = "Rust SDK for building custom integrations and extensions on top o
 # `grpc` adds a reference SagoService server/client over tonic, wrapping any
 # `DataProvider`. Off by default so the SDK stays lean for consumers that only
 # want the in-process API.
-grpc = ["dep:sago-proto", "dep:tonic", "dep:tonic-prost", "dep:prost"]
+grpc = ["dep:sago-proto", "dep:tonic", "dep:tonic-prost", "dep:prost", "dep:thiserror"]
 
 [dependencies]
 sago-core = { path = "../sago-core", version = "0.1.0" }
@@ -30,6 +30,7 @@ sago-proto = { path = "../sago-proto", version = "0.1.0", optional = true }
 tonic = { version = "0.14", optional = true }
 tonic-prost = { version = "0.14", optional = true }
 prost = { version = "0.14", optional = true }
+thiserror = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile.workspace = true

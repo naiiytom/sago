@@ -1,8 +1,9 @@
 use anyhow::{Result, anyhow};
 use clap::Args;
-use sago_core::registry::{list_domains, resolve_endpoint};
+use sago_core::registry::{DomainInfo, list_domains, resolve_endpoint};
 
 use crate::commands::plan::load_config;
+use crate::report::OutputFormat;
 
 #[derive(Args, Debug)]
 pub struct DomainsArgs {
@@ -11,6 +12,18 @@ pub struct DomainsArgs {
     /// is unknown or has no `endpoint` configured.
     #[arg(long)]
     pub resolve: Option<String>,
+
+    /// Only show domains that have at least one target tagged with them.
+    #[arg(long)]
+    pub with_targets: bool,
+
+    /// Only show domains missing a registered `endpoint`.
+    #[arg(long)]
+    pub missing_endpoint: bool,
+
+    /// Output format: human-readable text (default) or JSON on stdout.
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    pub format: OutputFormat,
 }
 
 pub async fn run(args: &DomainsArgs) -> Result<()> {
@@ -23,7 +36,20 @@ pub async fn run(args: &DomainsArgs) -> Result<()> {
         return Ok(());
     }
 
-    let domains = list_domains(&cfg);
+    let domains: Vec<DomainInfo> = list_domains(&cfg)
+        .into_iter()
+        .filter(|d| !args.with_targets || d.target_count > 0)
+        .filter(|d| !args.missing_endpoint || d.endpoint.is_none())
+        .collect();
+
+    if args.format == OutputFormat::Json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&domains).expect("DomainInfo always serializes")
+        );
+        return Ok(());
+    }
+
     if domains.is_empty() {
         println!("no domains known (no [domains] entries or target `domain =` references)");
         return Ok(());

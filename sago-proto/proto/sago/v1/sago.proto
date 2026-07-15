@@ -16,6 +16,11 @@ message Field {
   // Arrow data type, in the debug form used throughout sago (e.g. "Int64", "Utf8").
   string data_type = 2;
   bool nullable = 3;
+  // Arrow field-level metadata (arrow::datatypes::Field::metadata), e.g. a
+  // column comment or an extension-type marker attached by a custom
+  // DataProvider. Without this slot, any such metadata was silently dropped
+  // when a schema crossed the gRPC boundary.
+  map<string, string> metadata = 4;
 }
 
 // An ordered set of fields describing a dataset.
@@ -75,6 +80,7 @@ message ColumnStats {
   optional double mean = 3;
   optional double min = 4;
   optional double max = 5;
+  optional double variance = 6;
 }
 
 message ColumnDrift {
@@ -85,6 +91,10 @@ message ColumnDrift {
   optional double ks_statistic = 5;
   optional double ks_p_value = 6;
   optional double psi_statistic = 7;
+  // PSI over value-frequency distributions, for string/categorical columns
+  // (sago_core::drift::ColumnDrift::categorical_drift). None for numeric
+  // columns, which use psi_statistic instead.
+  optional double categorical_drift = 8;
 }
 
 message DataDrift {
@@ -153,6 +163,27 @@ message GetInclusionProofResponse {
   repeated ProofStep steps = 2;
 }
 
+// Batched form of GetInclusionProofRequest: answers every requested
+// leaf_index from one Merkle tree build instead of one build per index.
+// reconcile() uses this rather than N individual GetInclusionProof calls, so
+// a full reconciliation triggers one server-side full-dataset fetch and tree
+// build, not one per checked row.
+message GetInclusionProofsRequest {
+  string identifier = 1;
+  repeated uint64 leaf_indices = 2;
+}
+
+message GetInclusionProofsResponse {
+  // Same length and order as the request's leaf_indices. An entry is unset
+  // (leaf_hex empty, steps empty) if that index was out of range for the
+  // current dataset — checked per-entry rather than failing the whole call.
+  repeated GetInclusionProofResponse proofs = 1;
+  // True for each response entry that was actually found (index in range);
+  // parallel array to `proofs`, since proto3 has no per-repeated-element
+  // optionality without wrapping each entry in its own message.
+  repeated bool found = 2;
+}
+
 // A remote data-reliability provider: fetch schemas, compute diffs, and
 // reconcile via Merkle commitments over gRPC.
 service SagoService {
@@ -160,4 +191,5 @@ service SagoService {
   rpc Diff(DiffRequest) returns (DiffResponse);
   rpc GetMerkleRoot(GetMerkleRootRequest) returns (GetMerkleRootResponse);
   rpc GetInclusionProof(GetInclusionProofRequest) returns (GetInclusionProofResponse);
+  rpc GetInclusionProofs(GetInclusionProofsRequest) returns (GetInclusionProofsResponse);
 }

@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use clap::Args;
 use sago_core::config::Config;
-use sago_core::connection::build_provider;
+use sago_core::connection::ProviderCache;
 use sago_core::rbac::authorize_apply;
 use sago_core::state::{ProjectState, capture_snapshot};
 use std::path::Path;
@@ -26,8 +26,20 @@ pub async fn run(args: &ApplyArgs) -> Result<()> {
     let state_path = cwd.join(".sago").join("state.json");
 
     let cfg = load_config(&cfg_path)?;
+    if let Some(filter) = &args.target
+        && !cfg.targets.contains_key(filter)
+    {
+        anyhow::bail!(
+            "'{filter}' is not a known target name (checked Sago.toml's [targets.*] entries)"
+        );
+    }
     let mut state = ProjectState::load_or_default(&state_path)?;
     let actor = resolve_actor(args.actor.clone(), std::env::var("SAGO_ACTOR").ok());
+    // Shared across every target in this run so targets on the same named
+    // connection (a common data-mesh setup) reuse one provider/connection
+    // pool instead of each building — and, for Postgres, each opening up to
+    // 5 fresh physical connections — its own.
+    let providers = ProviderCache::new();
 
     let mut applied = Vec::new();
     for (name, tgt) in &cfg.targets {
@@ -37,7 +49,7 @@ pub async fn run(args: &ApplyArgs) -> Result<()> {
             continue;
         }
         if let Some(domain) = &tgt.domain
-            && cfg.domains.contains_key(domain)
+            && cfg.find_domain(domain).is_some()
         {
             let actor = actor.as_deref().ok_or_else(|| {
                 anyhow::anyhow!(
@@ -53,7 +65,8 @@ pub async fn run(args: &ApplyArgs) -> Result<()> {
                 name, tgt.connection
             )
         })?;
-        let provider = build_provider(conn)
+        let provider = providers
+            .get_or_build(&tgt.connection, conn)
             .await
             .with_context(|| format!("failed to build provider for '{}'", name))?;
         // Persist per-column samples by default so `sago plan`'s PSI drift gate

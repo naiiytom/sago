@@ -18,7 +18,7 @@ struct Cli {
     command: Commands,
 
     /// Sets the level of verbosity
-    #[arg(short, long, default_value_t = Level::INFO)]
+    #[arg(short, long, default_value_t = Level::INFO, global = true)]
     log_level: Level,
 }
 
@@ -56,7 +56,8 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         // `plan` returns a non-zero ExitCode when drift breaches the configured
         // threshold, so CI can gate on it.
         Commands::Plan(a) => commands::plan::run(a).await,
-        Commands::Diff(a) => commands::diff::run(a).await.map(|()| ExitCode::SUCCESS),
+        // Like `plan`/`federate`, `diff` exits non-zero on a drift-threshold breach.
+        Commands::Diff(a) => commands::diff::run(a).await,
         // Like `plan`, `federate` exits non-zero on a drift-threshold breach.
         Commands::Federate(a) => commands::federate::run(a).await,
         Commands::Domains(a) => commands::domains::run(a).await.map(|()| ExitCode::SUCCESS),

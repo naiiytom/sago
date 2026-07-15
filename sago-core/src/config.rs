@@ -24,6 +24,7 @@ pub struct Config {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProjectConfig {
     pub name: String,
     pub version: String,
@@ -39,6 +40,7 @@ pub enum S3Format {
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
+#[serde(deny_unknown_fields)]
 pub enum ConnectionConfig {
     #[serde(rename = "postgres")]
     Postgres { url: String },
@@ -52,6 +54,7 @@ pub enum ConnectionConfig {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TargetConfig {
     pub connection: String,
     pub identifier: String,
@@ -73,6 +76,7 @@ pub struct TargetConfig {
 /// `SagoService` node that domain's team operates. See `sago-core::rbac` and
 /// `sago-core::registry`.
 #[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct DomainConfig {
     /// Identities allowed to `apply` targets in this domain. Empty means the
     /// domain has an entry but nobody is authorized — a deliberate lockout,
@@ -98,6 +102,7 @@ pub struct DomainConfig {
 pub const DEFAULT_SAMPLE_N: usize = 1000;
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SampleConfig {
     /// Whether to persist per-column numeric samples for this target. Defaults to
     /// `true`: samples are what `sago plan`'s PSI drift gate compares against, so
@@ -117,6 +122,7 @@ fn default_sample_n() -> usize {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ChecksConfig {
     pub drift_threshold: f64,
     /// Minimum blended confidence for a removed/added column pair to be reported
@@ -131,7 +137,33 @@ fn default_rename_confidence_threshold() -> f64 {
     crate::rename::DEFAULT_MIN_CONFIDENCE
 }
 
+/// Normalize a domain name (trim whitespace, lowercase) for matching a
+/// target's `domain` value against a `[domains.<name>]` table key. Domain
+/// names are declared and referenced independently in different parts of
+/// `Sago.toml` (and possibly by different authors/times), so an exact,
+/// case-sensitive `HashMap` lookup would silently fail-open — a target with
+/// `domain = "sales"` against a declared `[domains.Sales]` would find no
+/// entry and be treated as *unrestricted*, with the RBAC list present in the
+/// file but silently inert.
+pub fn normalize_domain_name(name: &str) -> String {
+    name.trim().to_lowercase()
+}
+
 impl Config {
+    /// Look up a `[domains.<name>]` entry by normalized name (see
+    /// [`normalize_domain_name`]), returning the entry's *actual* declared key
+    /// alongside its config. Every caller that matches a target's `domain`
+    /// against `self.domains` must go through this rather than
+    /// `self.domains.get(domain)` directly, so a casing/whitespace mismatch
+    /// can't silently degrade a restricted domain into an unrestricted one.
+    pub fn find_domain(&self, domain: &str) -> Option<(&str, &DomainConfig)> {
+        let target = normalize_domain_name(domain);
+        self.domains
+            .iter()
+            .find(|(name, _)| normalize_domain_name(name) == target)
+            .map(|(name, cfg)| (name.as_str(), cfg))
+    }
+
     pub fn from_toml(content: &str) -> Result<Self> {
         // Detect the obsolete top-level `[schema]` table *structurally* rather
         // than by scanning the raw text: a naive `content.contains("[schema]")`
@@ -145,7 +177,12 @@ impl Config {
                 "config uses obsolete [schema] block — replace with [targets.<name>] entries; see docs".into(),
             ));
         }
-        let config: Config = value.try_into()?;
+        // Parse `content` directly into `Config` rather than converting the
+        // already-parsed `Value` via `.try_into()`: the latter loses the
+        // original source's line/column span and text snippet, degrading
+        // ordinary type-mismatch errors (e.g. a quoted number) to a bare
+        // message with no indication of where in the file the problem is.
+        let config: Config = toml::from_str(content)?;
         config.validate()?;
         Ok(config)
     }
@@ -171,8 +208,61 @@ impl Config {
                 "checks.rename_confidence_threshold must be in [0.0, 1.0], got {rt}"
             )));
         }
+
+        // A target naming an undeclared connection only ever surfaced as a
+        // per-target runtime error deep inside `apply`/`plan` (after other
+        // targets may already have done real I/O). Catching it here gives a
+        // single, immediate error before any target is touched.
+        for (target_name, target) in &self.targets {
+            if !self.connections.contains_key(&target.connection) {
+                return Err(crate::SagoError::Config(format!(
+                    "targets.{target_name}.connection = \"{}\" does not match any [connections.*] entry",
+                    target.connection
+                )));
+            }
+        }
+
+        let mut seen_normalized: HashMap<String, &str> = HashMap::new();
+        for (domain_name, domain) in &self.domains {
+            if let Some(endpoint) = &domain.endpoint {
+                validate_endpoint(domain_name, endpoint)?;
+            }
+            let normalized = normalize_domain_name(domain_name);
+            if let Some(other) = seen_normalized.insert(normalized, domain_name) {
+                return Err(crate::SagoError::Config(format!(
+                    "domains.{domain_name} and domains.{other} both normalize to the same domain name — declare it once"
+                )));
+            }
+        }
+
         Ok(())
     }
+}
+
+/// A minimal `scheme://host[:port]` shape check for a domain's `SagoService`
+/// endpoint. Deliberately not a full URI parser (this crate stays
+/// dependency-light so it can compile to `wasm32-unknown-unknown`) — it only
+/// catches the common failure modes (missing scheme, empty host, garbage
+/// like a stray space) at config-load time rather than letting them surface
+/// as an opaque tonic/transport error far from the config file that caused it.
+fn validate_endpoint(domain_name: &str, endpoint: &str) -> Result<()> {
+    let Some((scheme, rest)) = endpoint.split_once("://") else {
+        return Err(crate::SagoError::Config(format!(
+            "domains.{domain_name}.endpoint = \"{endpoint}\" is missing a scheme (expected e.g. \"http://host:port\")"
+        )));
+    };
+    if scheme != "http" && scheme != "https" {
+        return Err(crate::SagoError::Config(format!(
+            "domains.{domain_name}.endpoint = \"{endpoint}\" has unsupported scheme \"{scheme}\" (expected \"http\" or \"https\")"
+        )));
+    }
+    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+    if host.is_empty() || host.contains(char::is_whitespace) {
+        return Err(crate::SagoError::Config(format!(
+            "domains.{domain_name}.endpoint = \"{endpoint}\" has an invalid host"
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -740,5 +830,283 @@ drift_threshold = 0.05
             ConnectionConfig::S3 { format, .. } => assert!(format.is_none()),
             _ => panic!("expected S3"),
         }
+    }
+
+    // ── nested deny_unknown_fields ────────────────────────────────────────────
+
+    #[test]
+    fn test_unknown_field_in_target_is_rejected() {
+        // Regression: a typo'd nested field (e.g. "doamin" instead of "domain")
+        // used to be silently dropped since only the top-level Config struct
+        // enforced deny_unknown_fields — a target that the user believed was
+        // RBAC-restricted via `domain` would deserialize with domain = None
+        // (unrestricted) and no error anywhere.
+        let toml = r#"
+[project]
+name = "p"
+version = "1"
+
+[connections.c]
+type = "s3"
+bucket = "b"
+region = "r"
+
+[targets.t]
+connection = "c"
+identifier = "x"
+doamin = "sales"
+
+[checks]
+drift_threshold = 0.05
+"#;
+        assert!(Config::from_toml(toml).is_err());
+    }
+
+    #[test]
+    fn test_unknown_field_in_connection_is_rejected() {
+        let toml = r#"
+[project]
+name = "p"
+version = "1"
+
+[connections.c]
+type = "s3"
+bucket = "b"
+region = "r"
+bukcet = "typo"
+
+[targets.t]
+connection = "c"
+identifier = "x"
+
+[checks]
+drift_threshold = 0.05
+"#;
+        assert!(Config::from_toml(toml).is_err());
+    }
+
+    #[test]
+    fn test_unknown_field_in_domain_is_rejected() {
+        let toml = r#"
+[project]
+name = "p"
+version = "1"
+
+[connections.c]
+type = "s3"
+bucket = "b"
+region = "r"
+
+[domains.sales]
+operatorz = ["alice"]
+
+[checks]
+drift_threshold = 0.05
+"#;
+        assert!(Config::from_toml(toml).is_err());
+    }
+
+    #[test]
+    fn test_unknown_field_in_checks_is_rejected() {
+        let toml = r#"
+[project]
+name = "p"
+version = "1"
+
+[checks]
+drift_threshold = 0.05
+bogus_check = true
+"#;
+        assert!(Config::from_toml(toml).is_err());
+    }
+
+    // ── target.connection cross-validation ───────────────────────────────────
+
+    #[test]
+    fn test_target_referencing_unknown_connection_is_rejected() {
+        // A typo in `connection` (e.g. "warehosue") used to only surface as a
+        // per-target runtime error inside apply/plan, potentially after other
+        // targets had already done real I/O. Config::validate now catches it
+        // up front.
+        let toml = r#"
+[project]
+name = "p"
+version = "1"
+
+[connections.warehouse]
+type = "postgres"
+url = "postgres://user:pass@localhost/db"
+
+[targets.orders]
+connection = "warehosue"
+identifier = "orders"
+
+[checks]
+drift_threshold = 0.05
+"#;
+        let err = Config::from_toml(toml).unwrap_err();
+        match err {
+            crate::SagoError::Config(msg) => {
+                assert!(msg.contains("orders"));
+                assert!(msg.contains("warehosue"));
+            }
+            other => panic!("expected Config error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_target_referencing_known_connection_is_accepted() {
+        assert!(Config::from_toml(VALID_TOML).is_ok());
+    }
+
+    // ── domain endpoint validation ────────────────────────────────────────────
+
+    #[test]
+    fn test_domain_endpoint_missing_scheme_rejected() {
+        let toml = r#"
+[project]
+name = "mesh"
+version = "1"
+
+[domains.sales]
+endpoint = "sales.internal:50051"
+
+[checks]
+drift_threshold = 0.05
+"#;
+        let err = Config::from_toml(toml).unwrap_err();
+        assert!(matches!(err, crate::SagoError::Config(_)));
+    }
+
+    #[test]
+    fn test_domain_endpoint_with_space_rejected() {
+        let toml = r#"
+[project]
+name = "mesh"
+version = "1"
+
+[domains.sales]
+endpoint = "sales.internal 50051"
+
+[checks]
+drift_threshold = 0.05
+"#;
+        let err = Config::from_toml(toml).unwrap_err();
+        assert!(matches!(err, crate::SagoError::Config(_)));
+    }
+
+    #[test]
+    fn test_domain_endpoint_empty_rejected() {
+        let toml = r#"
+[project]
+name = "mesh"
+version = "1"
+
+[domains.sales]
+endpoint = ""
+
+[checks]
+drift_threshold = 0.05
+"#;
+        let err = Config::from_toml(toml).unwrap_err();
+        assert!(matches!(err, crate::SagoError::Config(_)));
+    }
+
+    #[test]
+    fn test_domain_endpoint_valid_http_and_https_accepted() {
+        for endpoint in ["http://sales.internal:50051", "https://sales.internal"] {
+            let toml = format!(
+                r#"
+[project]
+name = "mesh"
+version = "1"
+
+[domains.sales]
+endpoint = "{endpoint}"
+
+[checks]
+drift_threshold = 0.05
+"#
+            );
+            assert!(
+                Config::from_toml(&toml).is_ok(),
+                "endpoint {endpoint} should be accepted"
+            );
+        }
+    }
+
+    // ── TOML error span preservation ──────────────────────────────────────────
+
+    #[test]
+    fn test_type_mismatch_error_includes_line_information() {
+        // Regression: parsing via toml::Value then .try_into() discarded the
+        // original source's span/line info, degrading a type-mismatch error to
+        // a bare message with no indication of where in the file the problem
+        // is. Parsing directly into Config must preserve it.
+        let toml = r#"
+[project]
+name = "p"
+version = "1"
+
+[checks]
+drift_threshold = "0.05"
+"#;
+        let err = Config::from_toml(toml).unwrap_err();
+        match err {
+            crate::SagoError::TomlParse(e) => {
+                assert!(
+                    e.span().is_some(),
+                    "expected a source span on the TOML parse error, got {e:?}"
+                );
+            }
+            other => panic!("expected TomlParse error, got {other:?}"),
+        }
+    }
+
+    // ── domain name normalization ────────────────────────────────────────────
+
+    #[test]
+    fn test_find_domain_matches_case_insensitively() {
+        let toml = r#"
+[project]
+name = "mesh"
+version = "1"
+
+[domains.Sales]
+operators = ["alice"]
+
+[checks]
+drift_threshold = 0.05
+"#;
+        let cfg = Config::from_toml(toml).unwrap();
+        let (name, domain_cfg) = cfg.find_domain("sales").expect("should find via lowercase");
+        assert_eq!(name, "Sales");
+        assert_eq!(domain_cfg.operators, vec!["alice".to_string()]);
+        assert!(cfg.find_domain("SALES").is_some());
+        assert!(cfg.find_domain("  sales  ").is_some());
+        assert!(cfg.find_domain("marketing").is_none());
+    }
+
+    #[test]
+    fn test_duplicate_domain_names_after_normalization_rejected() {
+        // [domains.Sales] and [domains.sales] are two distinct TOML keys but
+        // normalize to the same domain — declaring both is ambiguous and
+        // must be rejected rather than one silently shadowing the other.
+        let toml = r#"
+[project]
+name = "mesh"
+version = "1"
+
+[domains.Sales]
+operators = ["alice"]
+
+[domains.sales]
+operators = ["bob"]
+
+[checks]
+drift_threshold = 0.05
+"#;
+        let err = Config::from_toml(toml).unwrap_err();
+        assert!(matches!(err, crate::SagoError::Config(_)));
     }
 }

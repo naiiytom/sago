@@ -39,10 +39,15 @@ impl std::fmt::Display for AccessDenied {
 /// error message) under `cfg`'s `[domains]` governance.
 ///
 /// A target with no `domain` set, or whose `domain` has no `[domains.<name>]`
-/// entry in `cfg`, is unrestricted — `Ok(())` regardless of `actor`. A domain
-/// *with* an entry restricts to its `operators` list, matched case-sensitively;
-/// an entry with an empty `operators` list is a deliberate lockout (nobody is
-/// authorized) rather than "unrestricted".
+/// entry in `cfg`, is unrestricted — `Ok(())` regardless of `actor`. The
+/// domain lookup is case/whitespace-normalized (see
+/// [`Config::find_domain`](crate::config::Config::find_domain)) so a target's
+/// `domain = "sales"` still finds a declared `[domains.Sales]` entry rather
+/// than silently falling through to "unrestricted". A domain *with* an entry
+/// restricts to its `operators` list, matched case-sensitively (operator
+/// identities, unlike domain names, are opaque actor strings with no
+/// canonical casing); an entry with an empty `operators` list is a deliberate
+/// lockout (nobody is authorized) rather than "unrestricted".
 pub fn authorize_apply(
     cfg: &Config,
     target_name: &str,
@@ -52,7 +57,7 @@ pub fn authorize_apply(
     let Some(domain) = &target.domain else {
         return Ok(());
     };
-    let Some(domain_cfg) = cfg.domains.get(domain) else {
+    let Some((_, domain_cfg)) = cfg.find_domain(domain) else {
         return Ok(());
     };
     if domain_cfg.operators.iter().any(|op| op == actor) {
@@ -170,7 +175,9 @@ operators = []
     }
 
     #[test]
-    fn test_match_is_case_sensitive() {
+    fn test_operator_match_is_case_sensitive() {
+        // Operator identities (actor strings) are matched exactly — only the
+        // *domain name* lookup is normalized, not the allowlist itself.
         let cfg = config_with_domains(
             r#"
 [domains.sales]
@@ -180,6 +187,34 @@ operators = ["Alice"]
         let orders = &cfg.targets["orders"];
         assert!(authorize_apply(&cfg, "orders", orders, "alice").is_err());
         assert!(authorize_apply(&cfg, "orders", orders, "Alice").is_ok());
+    }
+
+    #[test]
+    fn test_domain_name_match_is_case_insensitive() {
+        // Regression: a target's `domain = "sales"` must still find a
+        // declared `[domains.Sales]` entry (capital S) rather than silently
+        // falling through to "unrestricted" due to an exact-match miss.
+        let cfg = config_with_domains(
+            r#"
+[domains.Sales]
+operators = ["alice"]
+"#,
+        );
+        let orders = &cfg.targets["orders"]; // domain = "sales" (lowercase)
+        assert!(authorize_apply(&cfg, "orders", orders, "eve").is_err());
+        assert!(authorize_apply(&cfg, "orders", orders, "alice").is_ok());
+    }
+
+    #[test]
+    fn test_domain_name_match_ignores_surrounding_whitespace() {
+        let cfg = config_with_domains(
+            r#"
+[domains."  sales  "]
+operators = ["alice"]
+"#,
+        );
+        let orders = &cfg.targets["orders"];
+        assert!(authorize_apply(&cfg, "orders", orders, "alice").is_ok());
     }
 
     #[test]

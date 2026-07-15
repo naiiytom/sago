@@ -4,15 +4,27 @@ use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
 use async_trait::async_trait;
 use bytes::Bytes;
+use futures::TryStreamExt;
 use object_store::aws::AmazonS3Builder;
 use object_store::{ObjectStore, ObjectStoreExt, path::Path};
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use parquet::arrow::ParquetRecordBatchStreamBuilder;
+use parquet::arrow::async_reader::ParquetObjectReader;
 use std::sync::Arc;
 
 enum S3FormatResolved {
     Parquet,
     Csv,
-    Json,
+    /// Strictly newline-delimited JSON (one JSON object per line) — the
+    /// `.ndjson` extension, or an explicit `format = "json"` override,
+    /// signals this convention unambiguously.
+    Ndjson,
+    /// A `.json` file, whose content may be *either* NDJSON or a single
+    /// top-level JSON array (the more common shape for a plain REST/API
+    /// export like `[{...},{...}]`). Distinguished from `Ndjson` so the
+    /// data path can detect and unwrap a top-level array before handing the
+    /// bytes to Arrow's line-oriented JSON reader, which otherwise errors on
+    /// a bare array (`ValueIter` expects one JSON object per line).
+    JsonAmbiguous,
 }
 
 fn detect_format(override_format: Option<&S3Format>, identifier: &str) -> S3FormatResolved {
@@ -20,17 +32,53 @@ fn detect_format(override_format: Option<&S3Format>, identifier: &str) -> S3Form
         return match fmt {
             S3Format::Parquet => S3FormatResolved::Parquet,
             S3Format::Csv => S3FormatResolved::Csv,
-            S3Format::Json => S3FormatResolved::Json,
+            // An explicit override name of "json" is deliberately treated as
+            // ambiguous too (not forced-NDJSON), so a user who overrides the
+            // format for a `.dat`-extensioned array export still gets the
+            // array-unwrapping behavior below.
+            S3Format::Json => S3FormatResolved::JsonAmbiguous,
         };
     }
     let lower = identifier.to_lowercase();
     if lower.ends_with(".csv") {
         S3FormatResolved::Csv
-    } else if lower.ends_with(".json") || lower.ends_with(".ndjson") {
-        S3FormatResolved::Json
+    } else if lower.ends_with(".ndjson") {
+        S3FormatResolved::Ndjson
+    } else if lower.ends_with(".json") {
+        S3FormatResolved::JsonAmbiguous
     } else {
         S3FormatResolved::Parquet
     }
+}
+
+/// Arrow's JSON reader (`ValueIter`) is strictly newline-delimited: it reads
+/// one line at a time and requires each to parse as a JSON object. A `.json`
+/// export is just as commonly a single top-level JSON array
+/// (`[{...},{...}]`), which fails that reader outright ("Expected JSON
+/// record to be an object, found Array"). If `bytes` parses as a top-level
+/// JSON array, re-serialize it into newline-delimited form so the rest of
+/// the JSON pipeline (built entirely around NDJSON) can handle it
+/// unmodified; otherwise return `bytes` as-is (already NDJSON, or malformed
+/// — in which case the downstream NDJSON reader reports the real error).
+fn normalize_json_bytes(bytes: &Bytes) -> Bytes {
+    let trimmed_start = bytes
+        .iter()
+        .position(|b| !b.is_ascii_whitespace())
+        .unwrap_or(bytes.len());
+    if bytes.get(trimmed_start) != Some(&b'[') {
+        return bytes.clone();
+    }
+    let Ok(values) = serde_json::from_slice::<Vec<serde_json::Value>>(bytes) else {
+        return bytes.clone();
+    };
+    let mut out = Vec::new();
+    for value in &values {
+        if serde_json::to_writer(&mut out, value).is_err() {
+            return bytes.clone();
+        }
+        out.push(b'\n');
+    }
+    Bytes::from(out)
 }
 
 pub struct S3SchemaProvider {
@@ -77,16 +125,61 @@ impl S3SchemaProvider {
             .await
             .map_err(|e| SagoError::Io(std::io::Error::other(e)))
     }
+
+    /// A [`ParquetObjectReader`] over `identifier`, pre-sized via a `HEAD`
+    /// request so the reader issues bounded range requests for the footer
+    /// instead of a suffix request (not universally supported, and an extra
+    /// round-trip when the size is already known).
+    async fn parquet_object_reader(&self, identifier: &str) -> Result<ParquetObjectReader> {
+        let path = Path::from(identifier);
+        let meta = self
+            .store
+            .head(&path)
+            .await
+            .map_err(|e| SagoError::Io(std::io::Error::other(e)))?;
+        Ok(ParquetObjectReader::new(self.store.clone(), path).with_file_size(meta.size))
+    }
+
+    /// Read only the Parquet footer (schema + metadata) via bounded range
+    /// requests, never fetching the row-group data.
+    async fn schema_from_parquet_streaming(&self, identifier: &str) -> Result<Schema> {
+        let reader = self.parquet_object_reader(identifier).await?;
+        let builder = ParquetRecordBatchStreamBuilder::new(reader)
+            .await
+            .map_err(|e| SagoError::Schema(format!("Failed to parse parquet schema: {e}")))?;
+        Ok(builder.schema().as_ref().clone())
+    }
+
+    /// Stream every row group from the object store, decoding one at a time,
+    /// rather than materializing the whole object in memory up front.
+    async fn data_from_parquet_streaming(&self, identifier: &str) -> Result<Vec<RecordBatch>> {
+        let reader = self.parquet_object_reader(identifier).await?;
+        let builder = ParquetRecordBatchStreamBuilder::new(reader)
+            .await
+            .map_err(|e| SagoError::Schema(format!("Failed to parse parquet schema: {e}")))?;
+        let stream = builder
+            .build()
+            .map_err(|e| SagoError::Schema(format!("Failed to build parquet reader: {e}")))?;
+        stream
+            .try_collect::<Vec<_>>()
+            .await
+            .map_err(|e| SagoError::Schema(format!("Failed to read parquet row group: {e}")))
+    }
 }
 
 #[async_trait]
 impl SchemaProvider for S3SchemaProvider {
     async fn get_schema(&self, identifier: &str) -> Result<Schema> {
-        let bytes = self.fetch_bytes(identifier).await?;
         match detect_format(self.format.as_ref(), identifier) {
-            S3FormatResolved::Parquet => schema_from_parquet(&bytes),
-            S3FormatResolved::Csv => schema_from_csv(&bytes),
-            S3FormatResolved::Json => schema_from_json(&bytes),
+            // Parquet's footer-only metadata read goes straight through the
+            // object store (a couple of small range requests), never
+            // materializing the whole object just to read the schema.
+            S3FormatResolved::Parquet => self.schema_from_parquet_streaming(identifier).await,
+            S3FormatResolved::Csv => schema_from_csv(&self.fetch_bytes(identifier).await?),
+            S3FormatResolved::Ndjson => schema_from_json(&self.fetch_bytes(identifier).await?),
+            S3FormatResolved::JsonAmbiguous => {
+                schema_from_json(&normalize_json_bytes(&self.fetch_bytes(identifier).await?))
+            }
         }
     }
 }
@@ -94,19 +187,19 @@ impl SchemaProvider for S3SchemaProvider {
 #[async_trait]
 impl DataProvider for S3SchemaProvider {
     async fn get_data(&self, identifier: &str) -> Result<Vec<RecordBatch>> {
-        let bytes = self.fetch_bytes(identifier).await?;
         match detect_format(self.format.as_ref(), identifier) {
-            S3FormatResolved::Parquet => data_from_parquet(&bytes),
-            S3FormatResolved::Csv => data_from_csv(&bytes),
-            S3FormatResolved::Json => data_from_json(&bytes),
+            // Streamed row-group-at-a-time from the object store rather than
+            // buffering the whole object into memory first: a multi-GB
+            // Parquet file no longer risks OOMing a memory-constrained
+            // runner before a single row is parsed.
+            S3FormatResolved::Parquet => self.data_from_parquet_streaming(identifier).await,
+            S3FormatResolved::Csv => data_from_csv(&self.fetch_bytes(identifier).await?),
+            S3FormatResolved::Ndjson => data_from_json(&self.fetch_bytes(identifier).await?),
+            S3FormatResolved::JsonAmbiguous => {
+                data_from_json(&normalize_json_bytes(&self.fetch_bytes(identifier).await?))
+            }
         }
     }
-}
-
-fn schema_from_parquet(bytes: &Bytes) -> Result<Schema> {
-    let builder = ParquetRecordBatchReaderBuilder::try_new(bytes.clone())
-        .map_err(|e| SagoError::Schema(format!("Failed to parse parquet schema: {}", e)))?;
-    Ok(builder.schema().as_ref().clone())
 }
 
 fn schema_from_csv(bytes: &Bytes) -> Result<Schema> {
@@ -123,19 +216,6 @@ fn schema_from_json(bytes: &Bytes) -> Result<Schema> {
     let (schema, _) = infer_json_schema(std::io::Cursor::new(bytes.as_ref()), Some(100))
         .map_err(|e| SagoError::Schema(format!("JSON schema inference failed: {e}")))?;
     Ok(schema)
-}
-
-fn data_from_parquet(bytes: &Bytes) -> Result<Vec<RecordBatch>> {
-    let builder = ParquetRecordBatchReaderBuilder::try_new(bytes.clone())
-        .map_err(|e| SagoError::Schema(format!("Failed to parse parquet schema: {}", e)))?;
-    let reader = builder
-        .build()
-        .map_err(|e| SagoError::Schema(format!("Failed to build parquet reader: {}", e)))?;
-    let mut batches = Vec::new();
-    for batch_result in reader {
-        batches.push(batch_result.map_err(SagoError::Arrow)?);
-    }
-    Ok(batches)
 }
 
 fn data_from_csv(bytes: &Bytes) -> Result<Vec<RecordBatch>> {
@@ -246,13 +326,15 @@ mod tests {
 
     #[test]
     fn test_detect_format_json() {
+        // `.json` is ambiguous (may be NDJSON or a top-level array);
+        // `.ndjson` unambiguously signals strict newline-delimited JSON.
         assert!(matches!(
             detect_format(None, "data/file.json"),
-            S3FormatResolved::Json
+            S3FormatResolved::JsonAmbiguous
         ));
         assert!(matches!(
             detect_format(None, "data/file.ndjson"),
-            S3FormatResolved::Json
+            S3FormatResolved::Ndjson
         ));
     }
 
@@ -265,7 +347,7 @@ mod tests {
         ));
         assert!(matches!(
             detect_format(Some(&S3Format::Json), "data/file.csv"),
-            S3FormatResolved::Json
+            S3FormatResolved::JsonAmbiguous
         ));
     }
 
@@ -303,6 +385,71 @@ mod tests {
     fn test_data_from_json_basic() {
         let json_data = b"{\"id\":1,\"val\":1.5}\n{\"id\":2,\"val\":2.5}\n";
         let batches = data_from_json(&bytes::Bytes::from(json_data.as_ref())).unwrap();
+        let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total_rows, 2);
+    }
+
+    // ── normalize_json_bytes (top-level array vs NDJSON) ─────────────────────
+
+    #[test]
+    fn test_normalize_json_bytes_unwraps_top_level_array() {
+        // Regression: a `.json` export shaped as a single top-level array
+        // (a common REST/API dump convention) must be usable by the
+        // line-oriented NDJSON reader after normalization.
+        let array_json = Bytes::from(b"[{\"id\":1,\"name\":\"a\"},{\"id\":2,\"name\":\"b\"}]".as_slice());
+        let normalized = normalize_json_bytes(&array_json);
+        let schema = schema_from_json(&normalized).unwrap();
+        assert!(schema.field_with_name("id").is_ok());
+        assert!(schema.field_with_name("name").is_ok());
+        let batches = data_from_json(&normalized).unwrap();
+        let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total_rows, 2);
+    }
+
+    #[test]
+    fn test_normalize_json_bytes_leaves_ndjson_unchanged() {
+        let ndjson = Bytes::from(b"{\"id\":1}\n{\"id\":2}\n".as_slice());
+        let normalized = normalize_json_bytes(&ndjson);
+        assert_eq!(normalized, ndjson);
+    }
+
+    #[test]
+    fn test_normalize_json_bytes_handles_leading_whitespace_before_array() {
+        let array_json = Bytes::from(b"  \n[{\"id\":1}]".as_slice());
+        let normalized = normalize_json_bytes(&array_json);
+        let batches = data_from_json(&normalized).unwrap();
+        let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total_rows, 1);
+    }
+
+    #[test]
+    fn test_normalize_json_bytes_empty_array_produces_no_rows() {
+        let array_json = Bytes::from(b"[]".as_slice());
+        let normalized = normalize_json_bytes(&array_json);
+        assert_eq!(normalized.as_ref(), b"");
+    }
+
+    #[test]
+    fn test_get_schema_and_get_data_unwrap_json_array_via_provider() {
+        // End-to-end: a .json object holding a top-level array must work
+        // through the full S3SchemaProvider, not just the unit-level helper.
+        let store = Arc::new(object_store::memory::InMemory::new());
+        futures::executor::block_on(async {
+            store
+                .put(
+                    &Path::from("export.json"),
+                    Bytes::from(b"[{\"id\":1,\"name\":\"a\"},{\"id\":2,\"name\":\"b\"}]".as_slice())
+                        .into(),
+                )
+                .await
+                .unwrap();
+        });
+        let provider = S3SchemaProvider::new_with_store(store);
+
+        let schema = futures::executor::block_on(provider.get_schema("export.json")).unwrap();
+        assert!(schema.field_with_name("id").is_ok());
+
+        let batches = futures::executor::block_on(provider.get_data("export.json")).unwrap();
         let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
         assert_eq!(total_rows, 2);
     }

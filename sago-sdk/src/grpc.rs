@@ -93,7 +93,7 @@ impl sago_service_server::SagoService for ProviderService {
             .await
             .map_err(core_err_to_status)?;
         Ok(Response::new(v1::GetSchemaResponse {
-            schema: Some(schema_to_proto(&schema)),
+            schema: Some(schema_to_proto(&schema)?),
         }))
     }
 
@@ -133,28 +133,78 @@ impl sago_service_server::SagoService for ProviderService {
     ) -> Result<Response<v1::GetInclusionProofResponse>, Status> {
         let req = request.into_inner();
         let tree = self.merkle_tree(&req.identifier).await?;
-        let leaf_index = req.leaf_index as usize;
-        let leaf = tree.leaf(leaf_index).ok_or_else(|| {
-            Status::out_of_range(format!(
-                "leaf_index {} out of range (dataset has {} rows)",
-                req.leaf_index,
-                tree.leaf_count()
-            ))
-        })?;
-        // leaf() and proof() share the same bounds check, so this cannot fail
-        // now that leaf_index has already been validated above.
-        let proof = tree.proof(leaf_index).expect("index validated by leaf()");
-        Ok(Response::new(v1::GetInclusionProofResponse {
-            leaf_hex: to_hex(&leaf),
-            steps: proof
-                .steps
-                .into_iter()
-                .map(|s| v1::ProofStep {
-                    sibling_hex: s.sibling,
-                    sibling_is_left: s.sibling_is_left,
-                })
-                .collect(),
-        }))
+        let (leaf, proof) = leaf_and_proof(&tree, req.leaf_index)?;
+        Ok(Response::new(proof_to_proto(&leaf, proof)))
+    }
+
+    async fn get_inclusion_proofs(
+        &self,
+        request: Request<v1::GetInclusionProofsRequest>,
+    ) -> Result<Response<v1::GetInclusionProofsResponse>, Status> {
+        let req = request.into_inner();
+        // Built once and reused for every requested index, rather than once
+        // per index (as repeated GetInclusionProof calls would each trigger
+        // internally): a full reconcile() checking N rows previously cost N
+        // full-dataset fetches and Merkle tree rebuilds; this RPC brings it
+        // down to one.
+        let tree = self.merkle_tree(&req.identifier).await?;
+        let mut proofs = Vec::with_capacity(req.leaf_indices.len());
+        let mut found = Vec::with_capacity(req.leaf_indices.len());
+        for &idx in &req.leaf_indices {
+            match leaf_and_proof(&tree, idx) {
+                Ok((leaf, proof)) => {
+                    proofs.push(proof_to_proto(&leaf, proof));
+                    found.push(true);
+                }
+                Err(_) => {
+                    proofs.push(v1::GetInclusionProofResponse::default());
+                    found.push(false);
+                }
+            }
+        }
+        Ok(Response::new(v1::GetInclusionProofsResponse { proofs, found }))
+    }
+}
+
+/// The leaf hash and inclusion proof at `leaf_index`, or an out-of-range
+/// error. `leaf_index` arrives over the wire as a `u64` (proto has no
+/// native `usize`); converting with `try_from` rather than `as usize`
+/// matters on a 32-bit build target, where `as` would silently truncate an
+/// out-of-range index (e.g. 2^32) down to an in-range one instead of
+/// rejecting it.
+fn leaf_and_proof(
+    tree: &MerkleTree,
+    leaf_index: u64,
+) -> Result<(sago_core::merkle::Hash, sago_core::merkle::InclusionProof), Status> {
+    let out_of_range = || {
+        Status::out_of_range(format!(
+            "leaf_index {} out of range (dataset has {} rows)",
+            leaf_index,
+            tree.leaf_count()
+        ))
+    };
+    let idx = usize::try_from(leaf_index).map_err(|_| out_of_range())?;
+    let leaf = tree.leaf(idx).ok_or_else(out_of_range)?;
+    // leaf() and proof() share the same bounds check, so this cannot fail
+    // now that idx has already been validated above.
+    let proof = tree.proof(idx).expect("index validated by leaf()");
+    Ok((leaf, proof))
+}
+
+fn proof_to_proto(
+    leaf: &sago_core::merkle::Hash,
+    proof: sago_core::merkle::InclusionProof,
+) -> v1::GetInclusionProofResponse {
+    v1::GetInclusionProofResponse {
+        leaf_hex: to_hex(leaf),
+        steps: proof
+            .steps
+            .into_iter()
+            .map(|s| v1::ProofStep {
+                sibling_hex: s.sibling,
+                sibling_is_left: s.sibling_is_left,
+            })
+            .collect(),
     }
 }
 
@@ -243,34 +293,58 @@ where
     })?;
 
     let checked_len = local.leaf_count().min(remote_root.leaf_count as usize);
+
+    // One batched round trip for every row to check, rather than one
+    // GetInclusionProof call per row: the server builds/fetches the
+    // dataset's Merkle tree once for this whole request instead of once per
+    // row, turning what was an O(n) full-dataset-rebuild cost per
+    // reconcile() into a single rebuild.
+    let leaf_indices: Vec<u64> = (0..checked_len as u64).collect();
+    let resp = client
+        .get_inclusion_proofs(v1::GetInclusionProofsRequest {
+            identifier: identifier.to_string(),
+            leaf_indices: leaf_indices.clone(),
+        })
+        .await?
+        .into_inner();
+
+    if resp.proofs.len() != checked_len || resp.found.len() != checked_len {
+        return Err(Status::internal(format!(
+            "server returned {} proofs for {} requested indices",
+            resp.proofs.len(),
+            checked_len
+        )));
+    }
+
     let mut divergent_rows = Vec::new();
-    for i in 0..checked_len {
+    for (i, (proof_resp, &was_found)) in resp.proofs.iter().zip(&resp.found).enumerate() {
+        if !was_found {
+            // The server's dataset is shorter than checked_len implied (a
+            // race with a concurrent write, or a misbehaving server) — treat
+            // as divergent rather than silently skipping it.
+            divergent_rows.push(i);
+            continue;
+        }
+
         let local_leaf = local
             .leaf(i)
             .expect("i < local.leaf_count() by the min() above");
 
-        let resp = client
-            .get_inclusion_proof(v1::GetInclusionProofRequest {
-                identifier: identifier.to_string(),
-                leaf_index: i as u64,
-            })
-            .await?
-            .into_inner();
-
-        let remote_leaf = sago_core::merkle::from_hex(&resp.leaf_hex).ok_or_else(|| {
-            Status::internal(format!(
-                "server returned malformed leaf hash: {}",
-                resp.leaf_hex
-            ))
-        })?;
+        let remote_leaf =
+            sago_core::merkle::from_hex(&proof_resp.leaf_hex).ok_or_else(|| {
+                Status::internal(format!(
+                    "server returned malformed leaf hash: {}",
+                    proof_resp.leaf_hex
+                ))
+            })?;
 
         let proof = sago_core::merkle::InclusionProof {
             leaf_index: i,
-            steps: resp
+            steps: proof_resp
                 .steps
-                .into_iter()
+                .iter()
                 .map(|s| sago_core::merkle::ProofStep {
-                    sibling: s.sibling_hex,
+                    sibling: s.sibling_hex.clone(),
                     sibling_is_left: s.sibling_is_left,
                 })
                 .collect(),
@@ -299,20 +373,42 @@ fn core_err_to_status(e: sago_core::SagoError) -> Status {
     }
 }
 
-// ── proto conversions ────────────────────────────────────────────────────────
+// ── proto conversions (core -> proto) ────────────────────────────────────────
 
-fn schema_to_proto(schema: &arrow::datatypes::Schema) -> v1::Schema {
-    v1::Schema {
-        fields: schema
-            .fields()
-            .iter()
-            .map(|f| v1::Field {
+/// Converts `schema` to its proto form, or an `INVALID_ARGUMENT`/`INTERNAL`
+/// status if any field's Arrow type falls outside `schema_codec`'s
+/// serialize/parse whitelist (e.g. `Decimal128`, `List`, `Struct`, `UInt*`
+/// beyond what's supported). Previously this silently fell back to Arrow's
+/// `Debug` string, which the RPC always returned success for even though
+/// `parse_data_type` — the crate's own documented inverse — could never
+/// parse it back, losing the schema over the wire with no error anywhere.
+fn schema_to_proto(schema: &arrow::datatypes::Schema) -> Result<v1::Schema, Status> {
+    let fields = schema
+        .fields()
+        .iter()
+        .map(|f| {
+            let data_type = sago_core::schema_codec::serialize_data_type(f.data_type());
+            // serialize_data_type never fails outright, but round-trips only
+            // for its supported whitelist; verify it parses back before
+            // handing the string to a client who will call parse_data_type
+            // on it, rather than shipping a string that's already known to
+            // be unparseable.
+            if sago_core::schema_codec::parse_data_type(&data_type).is_err() {
+                return Err(Status::invalid_argument(format!(
+                    "column '{}' has Arrow type {:?}, which schema_codec cannot round-trip through gRPC",
+                    f.name(),
+                    f.data_type()
+                )));
+            }
+            Ok(v1::Field {
                 name: f.name().clone(),
-                data_type: sago_core::schema_codec::serialize_data_type(f.data_type()),
+                data_type,
                 nullable: f.is_nullable(),
+                metadata: f.metadata().clone(),
             })
-            .collect(),
-    }
+        })
+        .collect::<Result<Vec<_>, Status>>()?;
+    Ok(v1::Schema { fields })
 }
 
 fn semantic_to_proto(s: &sago_core::semantic::SemanticType) -> i32 {
@@ -344,6 +440,7 @@ fn stats_to_proto(s: &sago_core::drift::ColumnStats) -> v1::ColumnStats {
         mean: s.mean,
         min: s.min,
         max: s.max,
+        variance: s.variance,
     }
 }
 
@@ -388,6 +485,7 @@ fn data_drift_to_proto(d: &sago_core::drift::DataDrift) -> v1::DataDrift {
                         ks_statistic: c.ks_statistic,
                         ks_p_value: c.ks_p_value,
                         psi_statistic: c.psi_statistic,
+                        categorical_drift: c.categorical_drift,
                     },
                 )
             })
@@ -409,6 +507,195 @@ fn diff_report_to_proto(r: &sago_core::diff::DiffReport) -> v1::DiffReport {
     }
 }
 
+// ── proto conversions (proto -> core) ────────────────────────────────────────
+//
+// Only the core->proto direction existed before: a client calling
+// get_schema/diff via SagoServiceClient got back raw v1 types (e.g.
+// semantic_drifts[i].source_type as a bare i32) with no SDK-provided,
+// checked path back to sago_core types — asymmetric with reconcile(), which
+// fully wraps the Merkle RPCs and returns a core-friendly Reconciliation
+// enum. These give every RPC response the same treatment.
+
+/// A conversion error between a proto message and its `sago-core` domain
+/// type: a required field was `None`, or a value was outside its expected
+/// range/whitelist.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ProtoConvertError {
+    #[error("missing required field '{0}'")]
+    MissingField(&'static str),
+    #[error("invalid data: {0}")]
+    Invalid(String),
+}
+
+/// Converts a proto [`v1::Schema`] back to an Arrow [`arrow::datatypes::Schema`].
+pub fn proto_to_schema(s: &v1::Schema) -> Result<arrow::datatypes::Schema, ProtoConvertError> {
+    let fields = s
+        .fields
+        .iter()
+        .map(|f| {
+            let dt = sago_core::schema_codec::parse_data_type(&f.data_type)
+                .map_err(|e| ProtoConvertError::Invalid(e.to_string()))?;
+            Ok(arrow::datatypes::Field::new(&f.name, dt, f.nullable)
+                .with_metadata(f.metadata.clone()))
+        })
+        .collect::<Result<Vec<_>, ProtoConvertError>>()?;
+    Ok(arrow::datatypes::Schema::new(fields))
+}
+
+/// Converts a proto semantic-type discriminant back to
+/// [`sago_core::semantic::SemanticType`]. prost generates a safe,
+/// range-checked `TryFrom<i32>` for proto3 enums, so an out-of-range value
+/// from a newer/buggy server is rejected rather than reinterpreted.
+pub fn proto_to_semantic(
+    v: i32,
+) -> Result<sago_core::semantic::SemanticType, ProtoConvertError> {
+    use sago_core::semantic::SemanticType as S;
+    match v1::SemanticType::try_from(v) {
+        Ok(v1::SemanticType::Unknown) | Ok(v1::SemanticType::Unspecified) => Ok(S::Unknown),
+        Ok(v1::SemanticType::Email) => Ok(S::Email),
+        Ok(v1::SemanticType::CreditCard) => Ok(S::CreditCard),
+        Ok(v1::SemanticType::PhoneNumber) => Ok(S::PhoneNumber),
+        Ok(v1::SemanticType::Uuid) => Ok(S::UUID),
+        Ok(v1::SemanticType::IpAddress) => Ok(S::IPAddress),
+        Ok(v1::SemanticType::Url) => Ok(S::Url),
+        Err(_) => Err(ProtoConvertError::Invalid(format!(
+            "unknown SemanticType discriminant {v}"
+        ))),
+    }
+}
+
+fn proto_to_semantic_drift(
+    d: &v1::SemanticDrift,
+) -> Result<sago_core::drift::SemanticDrift, ProtoConvertError> {
+    Ok(sago_core::drift::SemanticDrift {
+        field_name: d.field_name.clone(),
+        source_type: proto_to_semantic(d.source_type)?,
+        target_type: proto_to_semantic(d.target_type)?,
+    })
+}
+
+fn proto_to_stats(s: &v1::ColumnStats) -> sago_core::drift::ColumnStats {
+    sago_core::drift::ColumnStats {
+        null_count: s.null_count as usize,
+        row_count: s.row_count as usize,
+        mean: s.mean,
+        min: s.min,
+        max: s.max,
+        variance: s.variance,
+    }
+}
+
+fn proto_to_schema_drift(d: &v1::SchemaDrift) -> sago_core::drift::SchemaDrift {
+    sago_core::drift::SchemaDrift {
+        added_fields: d.added_fields.clone(),
+        removed_fields: d.removed_fields.clone(),
+        changed_types: d
+            .changed_types
+            .iter()
+            .map(|c| sago_core::drift::TypeChange {
+                field_name: c.field_name.clone(),
+                old_type: c.old_type.clone(),
+                new_type: c.new_type.clone(),
+            })
+            .collect(),
+        renamed_fields: d
+            .renamed_fields
+            .iter()
+            .map(|r| sago_core::rename::FieldRename {
+                from: r.from.clone(),
+                to: r.to.clone(),
+                confidence: r.confidence,
+                // The proto FieldRename only carries the final confidence
+                // score, not the per-signal breakdown (type_match,
+                // semantic_match, name_similarity, stats_similarity) — that
+                // breakdown is server-side diagnostic detail, not part of
+                // the wire contract. Signals are conservatively marked
+                // absent/false rather than fabricated.
+                signals: sago_core::rename::RenameSignals {
+                    type_match: false,
+                    semantic_match: false,
+                    name_similarity: 0.0,
+                    stats_similarity: None,
+                },
+            })
+            .collect(),
+    }
+}
+
+fn proto_to_data_drift(d: &v1::DataDrift) -> sago_core::drift::DataDrift {
+    sago_core::drift::DataDrift {
+        column_drifts: d
+            .column_drifts
+            .iter()
+            .map(|(name, c)| {
+                (
+                    name.clone(),
+                    sago_core::drift::ColumnDrift {
+                        source_stats: c
+                            .source_stats
+                            .as_ref()
+                            .map(proto_to_stats)
+                            .unwrap_or(sago_core::drift::ColumnStats {
+                                null_count: 0,
+                                row_count: 0,
+                                mean: None,
+                                min: None,
+                                max: None,
+                                variance: None,
+                            }),
+                        target_stats: c
+                            .target_stats
+                            .as_ref()
+                            .map(proto_to_stats)
+                            .unwrap_or(sago_core::drift::ColumnStats {
+                                null_count: 0,
+                                row_count: 0,
+                                mean: None,
+                                min: None,
+                                max: None,
+                                variance: None,
+                            }),
+                        mean_drift: c.mean_drift,
+                        null_count_drift: c.null_count_drift,
+                        ks_statistic: c.ks_statistic,
+                        ks_p_value: c.ks_p_value,
+                        psi_statistic: c.psi_statistic,
+                        categorical_drift: c.categorical_drift,
+                    },
+                )
+            })
+            .collect(),
+    }
+}
+
+/// Converts a proto [`v1::DiffReport`] back to [`sago_core::diff::DiffReport`].
+pub fn proto_to_diff_report(
+    r: &v1::DiffReport,
+) -> Result<sago_core::diff::DiffReport, ProtoConvertError> {
+    let schema_drift = r
+        .schema_drift
+        .as_ref()
+        .map(proto_to_schema_drift)
+        .ok_or(ProtoConvertError::MissingField("schema_drift"))?;
+    let semantic_drifts = r
+        .semantic_drifts
+        .iter()
+        .map(proto_to_semantic_drift)
+        .collect::<Result<Vec<_>, _>>()?;
+    let data_drift = r
+        .data_drift
+        .as_ref()
+        .map(proto_to_data_drift)
+        .ok_or(ProtoConvertError::MissingField("data_drift"))?;
+    Ok(sago_core::diff::DiffReport {
+        source_identifier: r.source_identifier.clone(),
+        target_identifier: r.target_identifier.clone(),
+        schema_drift,
+        semantic_drifts,
+        data_drift,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -422,13 +709,56 @@ mod tests {
             Field::new("id", DataType::Int64, false),
             Field::new("email", DataType::Utf8, true),
         ]);
-        let p = schema_to_proto(&schema);
+        let p = schema_to_proto(&schema).unwrap();
         assert_eq!(p.fields.len(), 2);
         assert_eq!(p.fields[0].name, "id");
         assert_eq!(p.fields[0].data_type, "Int64");
         assert!(!p.fields[0].nullable);
         assert_eq!(p.fields[1].data_type, "Utf8");
         assert!(p.fields[1].nullable);
+    }
+
+    #[test]
+    fn test_schema_to_proto_carries_field_metadata() {
+        // Regression: schema_to_proto only mapped name/data_type/nullable,
+        // silently dropping any Arrow field metadata (e.g. a column comment
+        // or extension-type marker a custom DataProvider attached).
+        let field = Field::new("amount", DataType::Int64, false).with_metadata(
+            std::collections::HashMap::from([("unit".to_string(), "USD".to_string())]),
+        );
+        let schema = Schema::new(vec![field]);
+        let p = schema_to_proto(&schema).unwrap();
+        assert_eq!(p.fields[0].metadata.get("unit"), Some(&"USD".to_string()));
+    }
+
+    #[test]
+    fn test_schema_to_proto_rejects_unsupported_type() {
+        // Regression: a Decimal128/List/Struct/etc. column used to silently
+        // fall back to Arrow's Debug string (via serialize_data_type's
+        // catch-all), which parse_data_type can never read back — the
+        // schema was lost over the wire with the RPC still reporting
+        // success. It must now error instead.
+        let schema = Schema::new(vec![Field::new(
+            "items",
+            DataType::List(std::sync::Arc::new(Field::new(
+                "item",
+                DataType::Int32,
+                true,
+            ))),
+            true,
+        )]);
+        let err = schema_to_proto(&schema).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[test]
+    fn test_schema_to_proto_accepts_decimal128_now_supported() {
+        // Decimal128 is now in schema_codec's whitelist (added alongside the
+        // Postgres numeric-precision mapping fix), so it must round-trip
+        // through the gRPC schema conversion too.
+        let schema = Schema::new(vec![Field::new("price", DataType::Decimal128(10, 2), false)]);
+        let p = schema_to_proto(&schema).unwrap();
+        assert_eq!(p.fields[0].data_type, "Decimal128(10, 2)");
     }
 
     #[test]
@@ -497,6 +827,7 @@ mod tests {
             mean: Some(4.2),
             min: Some(0.0),
             max: Some(9.0),
+            variance: None,
         };
         let p = stats_to_proto(&s);
         assert_eq!(p.null_count, 3);
@@ -518,5 +849,125 @@ mod tests {
             core_err_to_status(sago_core::SagoError::Unknown("x".into())).code(),
             tonic::Code::Internal
         );
+    }
+
+    // ── leaf_and_proof / leaf_index bounds ────────────────────────────────────
+
+    #[test]
+    fn test_leaf_and_proof_rejects_out_of_range_index() {
+        let tree = MerkleTree::from_records([b"a".as_ref(), b"b", b"c"]);
+        let err = leaf_and_proof(&tree, 99).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::OutOfRange);
+    }
+
+    #[test]
+    fn test_leaf_and_proof_rejects_index_beyond_usize_range_on_conceptual_32_bit() {
+        // Regression: `leaf_index as usize` used to silently truncate a
+        // huge u64 (e.g. 2^32) down to an in-range usize on a 32-bit
+        // target instead of erroring. usize::try_from cannot itself
+        // reproduce the 32-bit truncation on this (64-bit) test host, but it
+        // does prove the conversion is checked rather than an infallible
+        // `as` cast: a value that doesn't fit any usize must always error.
+        // On a real 32-bit build, u64::MAX also fails try_from::<usize>,
+        // exercising the exact code path this regression test guards.
+        let tree = MerkleTree::from_records([b"a".as_ref(), b"b"]);
+        let err = leaf_and_proof(&tree, u64::MAX).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::OutOfRange);
+    }
+
+    #[test]
+    fn test_leaf_and_proof_succeeds_for_valid_index() {
+        let tree = MerkleTree::from_records([b"a".as_ref(), b"b", b"c"]);
+        let (leaf, _proof) = leaf_and_proof(&tree, 1).unwrap();
+        assert_eq!(leaf, sago_core::merkle::hash_leaf(b"b"));
+    }
+
+    // ── proto -> core conversions ─────────────────────────────────────────────
+
+    #[test]
+    fn test_proto_to_schema_round_trips() {
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("email", DataType::Utf8, true),
+        ]);
+        let p = schema_to_proto(&schema).unwrap();
+        let back = proto_to_schema(&p).unwrap();
+        assert_eq!(back, schema);
+    }
+
+    #[test]
+    fn test_proto_to_schema_preserves_metadata() {
+        let field = Field::new("amount", DataType::Int64, false).with_metadata(
+            std::collections::HashMap::from([("unit".to_string(), "USD".to_string())]),
+        );
+        let schema = Schema::new(vec![field.clone()]);
+        let p = schema_to_proto(&schema).unwrap();
+        let back = proto_to_schema(&p).unwrap();
+        assert_eq!(back.field(0).metadata(), field.metadata());
+    }
+
+    #[test]
+    fn test_proto_to_semantic_round_trips_every_variant() {
+        for s in [
+            SemanticType::Unknown,
+            SemanticType::Email,
+            SemanticType::CreditCard,
+            SemanticType::PhoneNumber,
+            SemanticType::UUID,
+            SemanticType::IPAddress,
+            SemanticType::Url,
+        ] {
+            let v = semantic_to_proto(&s);
+            assert_eq!(proto_to_semantic(v).unwrap(), s);
+        }
+    }
+
+    #[test]
+    fn test_proto_to_semantic_rejects_out_of_range_discriminant() {
+        let err = proto_to_semantic(9999).unwrap_err();
+        assert!(matches!(err, ProtoConvertError::Invalid(_)));
+    }
+
+    #[test]
+    fn test_proto_to_diff_report_round_trips() {
+        let report = sago_core::diff::DiffReport {
+            source_identifier: "src".into(),
+            target_identifier: "tgt".into(),
+            schema_drift: SchemaDrift {
+                added_fields: vec!["email".into()],
+                removed_fields: vec![],
+                changed_types: vec![],
+                renamed_fields: vec![],
+            },
+            semantic_drifts: vec![SemanticDrift {
+                field_name: "contact".into(),
+                source_type: SemanticType::Email,
+                target_type: SemanticType::Unknown,
+            }],
+            data_drift: sago_core::drift::DataDrift {
+                column_drifts: Default::default(),
+            },
+        };
+        let p = diff_report_to_proto(&report);
+        let back = proto_to_diff_report(&p).unwrap();
+        assert_eq!(back.source_identifier, "src");
+        assert_eq!(back.schema_drift.added_fields, vec!["email".to_string()]);
+        assert_eq!(back.semantic_drifts[0].field_name, "contact");
+        assert_eq!(back.semantic_drifts[0].source_type, SemanticType::Email);
+    }
+
+    #[test]
+    fn test_proto_to_diff_report_missing_schema_drift_errors() {
+        let p = v1::DiffReport {
+            source_identifier: "a".into(),
+            target_identifier: "b".into(),
+            schema_drift: None,
+            semantic_drifts: vec![],
+            data_drift: Some(v1::DataDrift {
+                column_drifts: Default::default(),
+            }),
+        };
+        let err = proto_to_diff_report(&p).unwrap_err();
+        assert_eq!(err, ProtoConvertError::MissingField("schema_drift"));
     }
 }

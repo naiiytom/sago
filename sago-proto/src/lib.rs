@@ -22,10 +22,10 @@ pub mod v1 {
 // needs when converting to/from the core domain types.
 pub use v1::{
     ColumnDrift, ColumnStats, DataDrift, DiffReport, DiffRequest, DiffResponse, Field, FieldRename,
-    GetInclusionProofRequest, GetInclusionProofResponse, GetMerkleRootRequest,
-    GetMerkleRootResponse, GetSchemaRequest, GetSchemaResponse, ProofStep, Schema, SchemaDrift,
-    SemanticDrift, SemanticType, TypeChange, sago_service_client::SagoServiceClient,
-    sago_service_server::SagoServiceServer,
+    GetInclusionProofRequest, GetInclusionProofResponse, GetInclusionProofsRequest,
+    GetInclusionProofsResponse, GetMerkleRootRequest, GetMerkleRootResponse, GetSchemaRequest,
+    GetSchemaResponse, ProofStep, Schema, SchemaDrift, SemanticDrift, SemanticType, TypeChange,
+    sago_service_client::SagoServiceClient, sago_service_server::SagoServiceServer,
 };
 
 #[cfg(test)]
@@ -39,6 +39,7 @@ mod tests {
             name: "id".into(),
             data_type: "Int64".into(),
             nullable: false,
+            metadata: Default::default(),
         };
         let schema = v1::Schema {
             fields: vec![field.clone()],

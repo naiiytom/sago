@@ -1,8 +1,8 @@
 use crate::schema_codec::serialize_data_type;
-use crate::semantic::{SemanticType, infer_semantic_type};
+use crate::semantic::{SemanticType, infer_semantic_type_multi};
 use arrow::array::{
-    Array, Float32Array, Float64Array, Int8Array, Int16Array, Int32Array, Int64Array, UInt8Array,
-    UInt16Array, UInt32Array, UInt64Array,
+    Array, Float32Array, Float64Array, Int8Array, Int16Array, Int32Array, Int64Array,
+    LargeStringArray, StringArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
 };
 use arrow::datatypes::{DataType, Schema};
 use arrow::record_batch::RecordBatch;
@@ -42,6 +42,12 @@ pub struct ColumnStats {
     pub mean: Option<f64>,
     pub min: Option<f64>,
     pub max: Option<f64>,
+    /// Population variance of the numeric values, when available. Lets
+    /// distribution-similarity checks (e.g. rename matching) distinguish
+    /// columns that share a mean/min/max but have very different shapes
+    /// (e.g. uniform vs. bimodal), which `mean`/`min`/`max` alone cannot.
+    #[serde(default)]
+    pub variance: Option<f64>,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
@@ -59,6 +65,12 @@ pub struct ColumnDrift {
     pub ks_p_value: Option<f64>,
     #[serde(default)]
     pub psi_statistic: Option<f64>,
+    /// PSI computed over value-frequency distributions, for non-numeric
+    /// (string/categorical) columns that `ks_statistic`/`psi_statistic` never
+    /// populate. `None` for numeric columns (which use `psi_statistic`
+    /// instead) or when either side has no non-null values.
+    #[serde(default)]
+    pub categorical_drift: Option<f64>,
 }
 
 impl ColumnDrift {
@@ -66,13 +78,15 @@ impl ColumnDrift {
     /// measured by the Population Stability Index (PSI) — a scale-free metric
     /// (unlike the raw `mean_drift`), so a single `checks.drift_threshold`
     /// applies uniformly across columns. Columns without a PSI (non-numeric, or
-    /// stats-only plans where PSI isn't computed) are treated as not-breaching.
+    /// stats-only plans where PSI isn't computed) fall back to
+    /// `categorical_drift`; a column with neither is treated as not-breaching.
     ///
     /// Common PSI rules of thumb: < 0.1 no significant shift, 0.1–0.25 moderate,
     /// > 0.25 major. A caller-supplied `threshold` overrides that judgement.
     #[must_use]
     pub fn breaches_threshold(&self, threshold: f64) -> bool {
         self.psi_statistic.is_some_and(|psi| psi > threshold)
+            || self.categorical_drift.is_some_and(|psi| psi > threshold)
     }
 }
 
@@ -132,11 +146,17 @@ pub fn detect_semantic_drift(
     let target_schema = target_batches[0].schema();
 
     for field_name in common_field_names(&source_schema, &target_schema) {
-        let source_col = source_batches[0].column_by_name(&field_name).unwrap();
-        let target_col = target_batches[0].column_by_name(&field_name).unwrap();
+        let source_cols: Vec<_> = source_batches
+            .iter()
+            .filter_map(|b| b.column_by_name(&field_name).cloned())
+            .collect();
+        let target_cols: Vec<_> = target_batches
+            .iter()
+            .filter_map(|b| b.column_by_name(&field_name).cloned())
+            .collect();
 
-        let source_semantic = infer_semantic_type(&field_name, source_col.as_ref());
-        let target_semantic = infer_semantic_type(&field_name, target_col.as_ref());
+        let source_semantic = infer_semantic_type_multi(&field_name, &source_cols);
+        let target_semantic = infer_semantic_type_multi(&field_name, &target_cols);
 
         if source_semantic != target_semantic {
             semantic_drifts.push(SemanticDrift {
@@ -206,6 +226,32 @@ fn for_each_numeric(column: &dyn Array, mut f: impl FnMut(f64)) {
     }
 }
 
+/// Derives mean/min/max/variance from an already-extracted value slice (e.g.
+/// from [`extract_numeric_values`]) rather than re-scanning the source
+/// arrays, so callers that need both the raw values (KS, PSI) and the
+/// summary stats only pay for one full traversal of the column.
+fn numeric_summary(vals: &[f64]) -> (Option<f64>, Option<f64>, Option<f64>, Option<f64>) {
+    if vals.is_empty() {
+        return (None, None, None, None);
+    }
+    let n = vals.len() as f64;
+    let sum: f64 = vals.iter().sum();
+    let mean = sum / n;
+    let mut min = f64::MAX;
+    let mut max = f64::MIN;
+    let mut sq_diff_sum = 0.0;
+    for &v in vals {
+        if v < min {
+            min = v;
+        }
+        if v > max {
+            max = v;
+        }
+        sq_diff_sum += (v - mean) * (v - mean);
+    }
+    (Some(mean), Some(min), Some(max), Some(sq_diff_sum / n))
+}
+
 pub fn calculate_column_stats(batches: &[RecordBatch], column_name: &str) -> Option<ColumnStats> {
     if batches.is_empty() {
         return None;
@@ -213,39 +259,32 @@ pub fn calculate_column_stats(batches: &[RecordBatch], column_name: &str) -> Opt
 
     let mut null_count = 0;
     let mut row_count = 0;
-    let mut sum = 0.0;
-    let mut min = f64::MAX;
-    let mut max = f64::MIN;
     let mut has_numeric = false;
-    let mut numeric_count = 0;
 
     for batch in batches {
         let column = batch.column_by_name(column_name)?;
         null_count += column.null_count();
         row_count += batch.num_rows();
-
-        if is_supported_numeric(column.data_type()) {
-            has_numeric = true;
-            for_each_numeric(column.as_ref(), |val| {
-                sum += val;
-                numeric_count += 1;
-                if val < min {
-                    min = val;
-                }
-                if val > max {
-                    max = val;
-                }
-            });
-        }
+        has_numeric |= is_supported_numeric(column.data_type());
     }
 
-    let has_values = has_numeric && numeric_count > 0;
+    // Single traversal of the numeric values (shared with any caller that
+    // also needs the raw values, e.g. detect_data_drift's KS/PSI path)
+    // rather than a second downcast-and-iterate pass just for sum/min/max.
+    let vals = if has_numeric {
+        extract_numeric_values(batches, column_name)
+    } else {
+        Vec::new()
+    };
+    let (mean, min, max, variance) = numeric_summary(&vals);
+
     Some(ColumnStats {
         null_count,
         row_count,
-        mean: has_values.then(|| sum / numeric_count as f64),
-        min: has_values.then_some(min),
-        max: has_values.then_some(max),
+        mean,
+        min,
+        max,
+        variance,
     })
 }
 
@@ -280,6 +319,7 @@ pub fn detect_data_drift_from_stats(
                 ks_statistic: None,
                 ks_p_value: None,
                 psi_statistic: None,
+                categorical_drift: None,
             },
         );
     }
@@ -302,28 +342,56 @@ pub fn detect_data_drift(
 
     for field_name in common_field_names(&source_schema, &target_schema) {
         let field_name = field_name.as_str();
-        let (source_stats, target_stats) = match (
-            calculate_column_stats(source_batches, field_name),
-            calculate_column_stats(target_batches, field_name),
+        let (source_null_count, source_row_count) = match null_and_row_count(
+            source_batches,
+            field_name,
         ) {
-            (Some(s), Some(t)) => (s, t),
-            _ => continue,
+            Some(v) => v,
+            None => continue,
+        };
+        let (target_null_count, target_row_count) = match null_and_row_count(
+            target_batches,
+            field_name,
+        ) {
+            Some(v) => v,
+            None => continue,
         };
 
-        let mean_drift =
-            if let (Some(s_mean), Some(t_mean)) = (source_stats.mean, target_stats.mean) {
-                Some((t_mean - s_mean).abs())
-            } else {
-                None
-            };
-
-        let null_count_drift = target_stats.null_count as i64 - source_stats.null_count as i64;
-
-        // Extract each side's numeric values exactly once, then reuse them for
-        // both the KS statistic (needs them sorted) and PSI (bins the raw
-        // values) instead of re-scanning and re-allocating per metric.
+        // Extract each side's numeric values exactly once, then derive
+        // mean/min/max/variance from that same extraction (numeric_summary)
+        // instead of a second full downcast-and-iterate pass over the source
+        // arrays, and reuse the values again for the KS statistic (needs them
+        // sorted) and PSI (bins the raw values).
         let src_vals = extract_numeric_values(source_batches, field_name);
         let tgt_vals = extract_numeric_values(target_batches, field_name);
+
+        let (s_mean, s_min, s_max, s_var) = numeric_summary(&src_vals);
+        let (t_mean, t_min, t_max, t_var) = numeric_summary(&tgt_vals);
+
+        let source_stats = ColumnStats {
+            null_count: source_null_count,
+            row_count: source_row_count,
+            mean: s_mean,
+            min: s_min,
+            max: s_max,
+            variance: s_var,
+        };
+        let target_stats = ColumnStats {
+            null_count: target_null_count,
+            row_count: target_row_count,
+            mean: t_mean,
+            min: t_min,
+            max: t_max,
+            variance: t_var,
+        };
+
+        let mean_drift = if let (Some(s), Some(t)) = (s_mean, t_mean) {
+            Some((t - s).abs())
+        } else {
+            None
+        };
+
+        let null_count_drift = target_null_count as i64 - source_null_count as i64;
 
         let psi_statistic = calculate_psi(&src_vals, &tgt_vals);
 
@@ -332,6 +400,8 @@ pub fn detect_data_drift(
         src_sorted.sort_by(|a, b| a.total_cmp(b));
         tgt_sorted.sort_by(|a, b| a.total_cmp(b));
         let (ks_statistic, ks_p_value) = ks_from_sorted(&src_sorted, &tgt_sorted);
+
+        let categorical_drift = detect_categorical_drift(source_batches, target_batches, field_name);
 
         column_drifts.insert(
             field_name.to_string(),
@@ -343,11 +413,27 @@ pub fn detect_data_drift(
                 ks_statistic,
                 ks_p_value,
                 psi_statistic,
+                categorical_drift,
             },
         );
     }
 
     DataDrift { column_drifts }
+}
+
+/// Total null/row count for `column_name` across `batches`, or `None` if the
+/// column is missing from any batch. Split out of [`calculate_column_stats`]
+/// so [`detect_data_drift`] can compute this cheap metadata without also
+/// paying for a second numeric extraction pass.
+fn null_and_row_count(batches: &[RecordBatch], column_name: &str) -> Option<(usize, usize)> {
+    let mut null_count = 0;
+    let mut row_count = 0;
+    for batch in batches {
+        let column = batch.column_by_name(column_name)?;
+        null_count += column.null_count();
+        row_count += batch.num_rows();
+    }
+    Some((null_count, row_count))
 }
 
 pub(crate) fn extract_numeric_values(batches: &[RecordBatch], column_name: &str) -> Vec<f64> {
@@ -358,6 +444,85 @@ pub(crate) fn extract_numeric_values(batches: &[RecordBatch], column_name: &str)
         }
     }
     values
+}
+
+/// Call `f` with every non-null string value of `column`. Mirrors
+/// [`for_each_numeric`]'s "downcast once, iterate" shape but for Utf8/LargeUtf8
+/// columns, so categorical drift can be computed without cloning values into
+/// an intermediate `Vec<String>` per batch.
+fn for_each_string(column: &dyn Array, mut f: impl FnMut(&str)) {
+    match column.data_type() {
+        DataType::Utf8 => {
+            let arr = column.as_any().downcast_ref::<StringArray>().unwrap();
+            for i in 0..arr.len() {
+                if !arr.is_null(i) {
+                    f(arr.value(i));
+                }
+            }
+        }
+        DataType::LargeUtf8 => {
+            let arr = column.as_any().downcast_ref::<LargeStringArray>().unwrap();
+            for i in 0..arr.len() {
+                if !arr.is_null(i) {
+                    f(arr.value(i));
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn value_frequencies(batches: &[RecordBatch], column_name: &str) -> HashMap<String, usize> {
+    let mut counts = HashMap::new();
+    for batch in batches {
+        if let Some(column) = batch.column_by_name(column_name) {
+            for_each_string(column.as_ref(), |v| {
+                *counts.entry(v.to_string()).or_insert(0) += 1;
+            });
+        }
+    }
+    counts
+}
+
+/// Population Stability Index over value-frequency distributions, for
+/// string/categorical columns. Unlike the numeric `calculate_psi` (which
+/// bins continuous values into quantile ranges), each *distinct value* is its
+/// own bin here — the natural analogue for categorical data, where "buckets"
+/// are already discrete. Returns `None` for numeric columns (handled by
+/// `detect_data_drift`'s KS/PSI path instead) or if either side has no
+/// non-null string values.
+fn detect_categorical_drift(
+    source_batches: &[RecordBatch],
+    target_batches: &[RecordBatch],
+    column_name: &str,
+) -> Option<f64> {
+    let is_string_column = source_batches
+        .first()
+        .and_then(|b| b.column_by_name(column_name))
+        .is_some_and(|c| matches!(c.data_type(), DataType::Utf8 | DataType::LargeUtf8));
+    if !is_string_column {
+        return None;
+    }
+
+    let source_counts = value_frequencies(source_batches, column_name);
+    let target_counts = value_frequencies(target_batches, column_name);
+
+    let n_src: usize = source_counts.values().sum();
+    let n_tgt: usize = target_counts.values().sum();
+    if n_src == 0 || n_tgt == 0 {
+        return None;
+    }
+    let n_src = n_src as f64;
+    let n_tgt = n_tgt as f64;
+
+    let all_values: HashSet<&String> = source_counts.keys().chain(target_counts.keys()).collect();
+    let mut psi = 0.0;
+    for value in all_values {
+        let e = (*source_counts.get(value).unwrap_or(&0) as f64 / n_src).max(PSI_EPSILON);
+        let a = (*target_counts.get(value).unwrap_or(&0) as f64 / n_tgt).max(PSI_EPSILON);
+        psi += (a - e) * (a / e).ln();
+    }
+    Some(psi)
 }
 
 /// Two-sample KS statistic and p-value from already-sorted samples (ascending by
@@ -701,6 +866,20 @@ mod tests {
         assert!(drift.column_drifts.is_empty());
     }
 
+    #[test]
+    fn test_detect_data_drift_populates_variance() {
+        // detect_data_drift must derive variance from the same extraction it
+        // already does for KS/PSI (numeric_summary), not skip it.
+        let source_batch = int32_batch("val", vec![Some(1), Some(2), Some(3)]);
+        let target_batch = int32_batch("val", vec![Some(1), Some(1), Some(1)]);
+        let drift = detect_data_drift(&[source_batch], &[target_batch]);
+        let val_drift = drift.column_drifts.get("val").unwrap();
+        // source [1,2,3]: mean 2, variance = ((1)^2+(0)^2+(1)^2)/3 = 2/3
+        assert!((val_drift.source_stats.variance.unwrap() - 2.0 / 3.0).abs() < 1e-9);
+        // target [1,1,1]: constant, variance 0
+        assert!((val_drift.target_stats.variance.unwrap() - 0.0).abs() < 1e-9);
+    }
+
     // ── KS test (via detect_data_drift) ──────────────────────────────────────
 
     #[test]
@@ -778,6 +957,41 @@ mod tests {
         assert_eq!(result[0].field_name, "contact");
         assert_eq!(result[0].source_type, SemanticType::Email);
         assert_eq!(result[0].target_type, SemanticType::Unknown);
+    }
+
+    #[test]
+    fn test_detect_semantic_drift_samples_across_all_batches() {
+        // Regression: a garbage-looking first batch must not, by itself,
+        // determine the classification of an otherwise-uniform multi-batch
+        // column. batch[0] here is 3 non-email strings; batches 1..3 are all
+        // emails — the column as a whole is >80% email and must classify as
+        // Email on both sides, so no drift is reported.
+        let junk_batch = str_batch("contact", vec![Some("nope"), Some("nah"), Some("no")]);
+        let email_batch_1 = str_batch(
+            "contact",
+            vec![
+                Some("a@x.com"),
+                Some("b@x.com"),
+                Some("c@x.com"),
+                Some("d@x.com"),
+                Some("e@x.com"),
+                Some("f@x.com"),
+                Some("g@x.com"),
+                Some("h@x.com"),
+                Some("i@x.com"),
+                Some("j@x.com"),
+            ],
+        );
+        let email_batch_2 = email_batch_1.clone();
+
+        let source = vec![junk_batch.clone(), email_batch_1.clone(), email_batch_2.clone()];
+        let target = vec![junk_batch, email_batch_1, email_batch_2];
+
+        let result = detect_semantic_drift(&source, &target);
+        assert!(
+            result.is_empty(),
+            "expected no drift (both sides classify Email from the full column), got {result:?}"
+        );
     }
 
     // ── extract_numeric_values ───────────────────────────────────────────────
@@ -922,6 +1136,7 @@ mod tests {
             mean: Some(4.2),
             min: Some(0.0),
             max: Some(10.0),
+            variance: Some(2.1),
         };
         let json = serde_json::to_string(&stats).unwrap();
         let back: ColumnStats = serde_json::from_str(&json).unwrap();
@@ -943,6 +1158,7 @@ mod tests {
                 mean: Some(50.0),
                 min: Some(0.0),
                 max: Some(100.0),
+                variance: None,
             },
         );
         source.insert(
@@ -953,6 +1169,7 @@ mod tests {
                 mean: Some(1.0),
                 min: Some(1.0),
                 max: Some(1.0),
+                variance: None,
             },
         );
 
@@ -965,6 +1182,7 @@ mod tests {
                 mean: Some(60.0),
                 min: Some(0.0),
                 max: Some(100.0),
+                variance: None,
             },
         );
         // 'extra' missing from target — should be skipped (intersection only)
@@ -1002,6 +1220,7 @@ mod tests {
                 mean: Some(2.0),
                 min: Some(1.0),
                 max: Some(3.0),
+                variance: None,
             },
         );
         let mut target = HashMap::new();
@@ -1013,6 +1232,7 @@ mod tests {
                 mean: Some(5.0),
                 min: Some(4.0),
                 max: Some(6.0),
+                variance: None,
             },
         );
         let drift = detect_data_drift_from_stats(&source, &target);
@@ -1038,6 +1258,69 @@ mod tests {
         let col = drift.column_drifts.get("val").unwrap();
         assert!(col.psi_statistic.is_some());
         assert!(col.psi_statistic.unwrap() > 0.1);
+    }
+
+    // ── categorical drift (string-column PSI) ───────────────────────────────
+
+    #[test]
+    fn test_categorical_drift_none_for_numeric_column() {
+        let b1 = int32_batch("val", vec![Some(1), Some(2), Some(3)]);
+        let b2 = int32_batch("val", vec![Some(1), Some(2), Some(3)]);
+        let drift = detect_data_drift(&[b1], &[b2]);
+        let col = drift.column_drifts.get("val").unwrap();
+        assert_eq!(col.categorical_drift, None);
+    }
+
+    #[test]
+    fn test_categorical_drift_zero_for_identical_frequencies() {
+        let b1 = str_batch(
+            "status",
+            vec![Some("active"), Some("active"), Some("inactive")],
+        );
+        let b2 = str_batch(
+            "status",
+            vec![Some("active"), Some("active"), Some("inactive")],
+        );
+        let drift = detect_data_drift(&[b1], &[b2]);
+        let col = drift.column_drifts.get("status").unwrap();
+        let psi = col.categorical_drift.expect("string column should get categorical_drift");
+        assert!(psi.abs() < 1e-9, "expected ~0 PSI, got {psi}");
+    }
+
+    #[test]
+    fn test_categorical_drift_detects_frequency_flip() {
+        // A category shifting from 90% active / 10% inactive to the reverse
+        // is invisible to numeric PSI/KS (there's no numeric column here) and
+        // to detect_semantic_drift (both sides are still SemanticType::Unknown
+        // plain strings) — categorical_drift must be the signal that catches it.
+        let mut source_vals = vec![Some("active"); 9];
+        source_vals.push(Some("inactive"));
+        let mut target_vals = vec![Some("inactive"); 9];
+        target_vals.push(Some("active"));
+
+        let b1 = str_batch("status", source_vals);
+        let b2 = str_batch("status", target_vals);
+        let drift = detect_data_drift(&[b1], &[b2]);
+        let col = drift.column_drifts.get("status").unwrap();
+        let psi = col.categorical_drift.expect("string column should get categorical_drift");
+        assert!(psi > 0.25, "expected a major shift, got psi={psi}");
+        assert!(col.breaches_threshold(0.25));
+    }
+
+    #[test]
+    fn test_categorical_drift_aggregates_across_batches() {
+        let b1a = str_batch("status", vec![Some("active"); 5]);
+        let b1b = str_batch("status", vec![Some("inactive"); 5]);
+        let b2 = str_batch(
+            "status",
+            vec![Some("active"), Some("active"), Some("inactive")],
+        );
+        let drift = detect_data_drift(&[b1a, b1b], &[b2]);
+        let col = drift.column_drifts.get("status").unwrap();
+        // source is 50/50 active/inactive across its two batches; target is
+        // ~67/33 — a real but moderate shift, not the ~0 a single-batch read
+        // (either all-active or all-inactive) would report.
+        assert!(col.categorical_drift.is_some());
     }
 
     // ── quantile binning ─────────────────────────────────────────────────────

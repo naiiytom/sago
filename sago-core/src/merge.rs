@@ -33,7 +33,7 @@ enum FieldChange {
     Added,
     /// Present in base, absent on this side.
     Removed,
-    /// Present in both but the type and/or nullability differs.
+    /// Present in both but the type, nullability, and/or metadata differs.
     Modified,
 }
 
@@ -46,6 +46,9 @@ pub enum ConflictKind {
     ModifyModify,
     /// One side removed the field while the other modified it.
     RemoveModify,
+    /// Both sides set different metadata on the schema itself (no field
+    /// involved — [`MergeConflict::field_name`] is empty for this kind).
+    SchemaMetadataModifyModify,
 }
 
 /// A single field on which `ours` and `theirs` disagree and which could not be
@@ -84,9 +87,10 @@ impl MergeResult {
     }
 }
 
-/// Render a field's definition (type + nullability) for conflict reporting.
+/// Render a field's definition (type + nullability + metadata) for conflict
+/// reporting.
 fn describe(field: &Field) -> String {
-    format!(
+    let mut s = format!(
         "{:?}{}",
         field.data_type(),
         if field.is_nullable() {
@@ -94,13 +98,27 @@ fn describe(field: &Field) -> String {
         } else {
             " (non-null)"
         }
-    )
+    );
+    if !field.metadata().is_empty() {
+        let mut entries: Vec<(&String, &String)> = field.metadata().iter().collect();
+        entries.sort();
+        s.push_str(&format!(" metadata={entries:?}"));
+    }
+    s
 }
 
-/// Two fields are "the same definition" when type *and* nullability agree.
-/// (Name equality is implied — they are keyed by name.)
+/// Two fields are "the same definition" when type, nullability, *and*
+/// metadata agree. (Name equality is implied — they are keyed by name.)
+///
+/// Metadata is included so a metadata-only edit (e.g. a column comment or an
+/// extension-type marker) is treated as a real change: without this, two
+/// sides that set *different* metadata on an otherwise-unchanged field would
+/// both classify as `Unchanged`, and the merge would silently keep `base`'s
+/// metadata-less field — discarding both edits with no conflict reported.
 fn same_def(a: &Field, b: &Field) -> bool {
-    a.data_type() == b.data_type() && a.is_nullable() == b.is_nullable()
+    a.data_type() == b.data_type()
+        && a.is_nullable() == b.is_nullable()
+        && a.metadata() == b.metadata()
 }
 
 fn classify(base: Option<&Field>, side: Option<&Field>) -> FieldChange {
@@ -199,10 +217,77 @@ pub fn three_way_merge(base: &Schema, ours: &Schema, theirs: &Schema) -> MergeRe
         }
     }
 
+    let merged_metadata = merge_schema_metadata(base, ours, theirs, &mut conflicts);
+
     MergeResult {
-        merged: Schema::new(merged_fields),
+        merged: Schema::new(merged_fields).with_metadata(merged_metadata),
         conflicts,
     }
+}
+
+/// Three-way merge of schema-level (not field-level) metadata, following the
+/// same neither/one-side/both-agree/both-disagree rules as field merging.
+/// `Schema::new` always sets an empty metadata map regardless of input, so
+/// without this every three-way merge would unconditionally discard any
+/// schema-level metadata from all three inputs.
+fn merge_schema_metadata(
+    base: &Schema,
+    ours: &Schema,
+    theirs: &Schema,
+    conflicts: &mut Vec<MergeConflict>,
+) -> std::collections::HashMap<String, String> {
+    let mut keys: BTreeSet<&String> = BTreeSet::new();
+    for schema in [base, ours, theirs] {
+        keys.extend(schema.metadata().keys());
+    }
+
+    let mut merged = std::collections::HashMap::new();
+    for key in keys {
+        let b = base.metadata().get(key);
+        let o = ours.metadata().get(key);
+        let t = theirs.metadata().get(key);
+
+        match (b == o, b == t, o == t) {
+            // Neither side changed this key.
+            (true, true, _) => {
+                if let Some(v) = o {
+                    merged.insert(key.clone(), v.clone());
+                }
+            }
+            // Only theirs changed it.
+            (true, false, _) => {
+                if let Some(v) = t {
+                    merged.insert(key.clone(), v.clone());
+                }
+            }
+            // Only ours changed it.
+            (false, true, _) => {
+                if let Some(v) = o {
+                    merged.insert(key.clone(), v.clone());
+                }
+            }
+            // Both changed it, but to the same value.
+            (false, false, true) => {
+                if let Some(v) = o {
+                    merged.insert(key.clone(), v.clone());
+                }
+            }
+            // Both changed it, to different values: conflict, keep `ours`.
+            (false, false, false) => {
+                conflicts.push(MergeConflict {
+                    field_name: format!("<schema metadata: {key}>"),
+                    kind: ConflictKind::SchemaMetadataModifyModify,
+                    base: b.cloned(),
+                    ours: o.cloned(),
+                    theirs: t.cloned(),
+                });
+                if let Some(v) = o {
+                    merged.insert(key.clone(), v.clone());
+                }
+            }
+        }
+    }
+    merged
 }
 
 fn push_side(out: &mut Vec<Field>, field: Option<&Field>) {
@@ -432,5 +517,149 @@ mod tests {
         let json = serde_json::to_string(&c).unwrap();
         let back: MergeConflict = serde_json::from_str(&json).unwrap();
         assert_eq!(c, back);
+    }
+
+    // ── field metadata ───────────────────────────────────────────────────────
+
+    fn with_meta(field: Field, key: &str, value: &str) -> Field {
+        field.with_metadata(std::collections::HashMap::from([(
+            key.to_string(),
+            value.to_string(),
+        )]))
+    }
+
+    #[test]
+    fn test_field_metadata_only_conflict_is_detected_not_silently_dropped() {
+        // Regression: base has no metadata; ours and theirs both set the same
+        // key to *different* values, with type/nullability unchanged on both
+        // sides. Before metadata was compared, same_def ignored it, so this
+        // classified as (Unchanged, Unchanged) and both edits were silently
+        // discarded with no conflict reported.
+        let base = schema(vec![f("amount", DataType::Int64, false)]);
+        let ours = schema(vec![with_meta(
+            f("amount", DataType::Int64, false),
+            "unit",
+            "USD",
+        )]);
+        let theirs = schema(vec![with_meta(
+            f("amount", DataType::Int64, false),
+            "unit",
+            "EUR",
+        )]);
+
+        let result = three_way_merge(&base, &ours, &theirs);
+        assert_eq!(result.conflicts.len(), 1, "conflicts: {:?}", result.conflicts);
+        assert_eq!(result.conflicts[0].field_name, "amount");
+        assert_eq!(result.conflicts[0].kind, ConflictKind::ModifyModify);
+        // Merged keeps `ours` so metadata isn't silently lost even on conflict.
+        assert_eq!(
+            result
+                .merged
+                .field_with_name("amount")
+                .unwrap()
+                .metadata()
+                .get("unit"),
+            Some(&"USD".to_string())
+        );
+    }
+
+    #[test]
+    fn test_field_metadata_only_change_on_one_side_is_clean() {
+        let base = schema(vec![f("amount", DataType::Int64, false)]);
+        let ours = schema(vec![with_meta(
+            f("amount", DataType::Int64, false),
+            "unit",
+            "USD",
+        )]);
+        let theirs = base.clone();
+
+        let result = three_way_merge(&base, &ours, &theirs);
+        assert!(result.is_clean(), "conflicts: {:?}", result.conflicts);
+        assert_eq!(
+            result
+                .merged
+                .field_with_name("amount")
+                .unwrap()
+                .metadata()
+                .get("unit"),
+            Some(&"USD".to_string())
+        );
+    }
+
+    #[test]
+    fn test_field_metadata_identical_change_on_both_sides_is_clean() {
+        let base = schema(vec![f("amount", DataType::Int64, false)]);
+        let changed = schema(vec![with_meta(
+            f("amount", DataType::Int64, false),
+            "unit",
+            "USD",
+        )]);
+
+        let result = three_way_merge(&base, &changed, &changed);
+        assert!(result.is_clean(), "conflicts: {:?}", result.conflicts);
+        assert_eq!(
+            result
+                .merged
+                .field_with_name("amount")
+                .unwrap()
+                .metadata()
+                .get("unit"),
+            Some(&"USD".to_string())
+        );
+    }
+
+    // ── schema-level metadata ─────────────────────────────────────────────────
+
+    fn schema_with_meta(fields: Vec<Field>, key: &str, value: &str) -> Schema {
+        Schema::new(fields).with_metadata(std::collections::HashMap::from([(
+            key.to_string(),
+            value.to_string(),
+        )]))
+    }
+
+    #[test]
+    fn test_schema_metadata_unchanged_is_preserved() {
+        // Regression: Schema::new always sets empty metadata, so without an
+        // explicit schema-metadata merge step, this would always come back
+        // empty even when neither side touched it.
+        let base = schema_with_meta(vec![f("id", DataType::Int64, false)], "source", "erp");
+        let result = three_way_merge(&base, &base, &base);
+        assert!(result.is_clean());
+        assert_eq!(
+            result.merged.metadata().get("source"),
+            Some(&"erp".to_string())
+        );
+    }
+
+    #[test]
+    fn test_schema_metadata_conflict_is_detected() {
+        let base = schema(vec![f("id", DataType::Int64, false)]);
+        let ours = schema_with_meta(vec![f("id", DataType::Int64, false)], "owner", "team-a");
+        let theirs = schema_with_meta(vec![f("id", DataType::Int64, false)], "owner", "team-b");
+
+        let result = three_way_merge(&base, &ours, &theirs);
+        assert_eq!(result.conflicts.len(), 1, "conflicts: {:?}", result.conflicts);
+        assert_eq!(
+            result.conflicts[0].kind,
+            ConflictKind::SchemaMetadataModifyModify
+        );
+        assert_eq!(
+            result.merged.metadata().get("owner"),
+            Some(&"team-a".to_string())
+        );
+    }
+
+    #[test]
+    fn test_schema_metadata_one_side_adds_is_clean() {
+        let base = schema(vec![f("id", DataType::Int64, false)]);
+        let ours = schema_with_meta(vec![f("id", DataType::Int64, false)], "owner", "team-a");
+        let theirs = base.clone();
+
+        let result = three_way_merge(&base, &ours, &theirs);
+        assert!(result.is_clean(), "conflicts: {:?}", result.conflicts);
+        assert_eq!(
+            result.merged.metadata().get("owner"),
+            Some(&"team-a".to_string())
+        );
     }
 }

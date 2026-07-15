@@ -5,9 +5,10 @@ use sago_core::connection::build_provider;
 use sago_core::diff::diff_datasets_with_options;
 use sago_core::rename::RenameOptions;
 use std::path::{Path, PathBuf};
+use std::process::ExitCode;
 
-use crate::commands::plan::resolve_rename_threshold;
-use crate::report::{default_artifact_path, print_terminal, write_artifact};
+use crate::commands::plan::{collect_breaches, resolve_rename_threshold};
+use crate::report::{OutputFormat, default_artifact_path, print_json, print_terminal, write_artifact};
 
 #[derive(Args, Debug)]
 pub struct DiffArgs {
@@ -23,9 +24,13 @@ pub struct DiffArgs {
     /// (default: checks.rename_confidence_threshold from Sago.toml).
     #[arg(long)]
     pub rename_threshold: Option<f64>,
+
+    /// Output format: human-readable text (default) or JSON on stdout.
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    pub format: OutputFormat,
 }
 
-pub async fn run(args: &DiffArgs) -> Result<()> {
+pub async fn run(args: &DiffArgs) -> Result<ExitCode> {
     let cwd = std::env::current_dir()?;
     let cfg = load_config(&cwd.join("Sago.toml"))?;
 
@@ -47,12 +52,33 @@ pub async fn run(args: &DiffArgs) -> Result<()> {
 
     let report = diff_datasets_with_options(left, &left_id, right, &right_id, &rename_opts).await?;
 
-    print_terminal(std::slice::from_ref(&report));
+    if args.format == OutputFormat::Json {
+        print_json(std::slice::from_ref(&report))?;
+    } else {
+        print_terminal(std::slice::from_ref(&report));
+    }
+
+    // Gate the exit code on the same drift threshold `plan`/`federate` use,
+    // so `sago diff` can drive a CI pipeline the same way — previously it
+    // always exited 0 regardless of how severe the PSI/KS drift was.
+    let threshold = cfg.checks.drift_threshold;
+    let breaches = collect_breaches(std::slice::from_ref(&report), threshold);
 
     let out = args.out.clone().unwrap_or_else(default_artifact_path);
     write_artifact(&[report], &out)?;
     println!("diff written to {}", out.display());
-    Ok(())
+
+    if breaches.is_empty() {
+        Ok(ExitCode::SUCCESS)
+    } else {
+        eprintln!(
+            "drift threshold {:.4} exceeded by {} column(s): {}",
+            threshold,
+            breaches.len(),
+            breaches.join(", ")
+        );
+        Ok(ExitCode::FAILURE)
+    }
 }
 
 pub(crate) fn resolve<'a>(

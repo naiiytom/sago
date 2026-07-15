@@ -20,6 +20,18 @@ use sago_core::merkle::MerkleTree;
 use sago_core::schema_codec::{parse_data_type, serialize_data_type};
 use sago_core::semantic::infer_semantic_type;
 
+/// Installs a panic hook that forwards Rust panic messages to the browser's
+/// `console.error`, run automatically once per module instantiation via
+/// `#[wasm_bindgen(start)]`. Without this, a panic anywhere in the dependency
+/// chain (e.g. an Arrow allocation/formatting panic) surfaces to JS only as
+/// an opaque `RuntimeError: unreachable executed` with no message or Rust
+/// stack context — undiagnosable from the JS side, unlike this crate's own
+/// careful use of `Result<JsValue, JsValue>` everywhere else.
+#[wasm_bindgen(start)]
+pub fn init_panic_hook() {
+    console_error_panic_hook::set_once();
+}
+
 /// A JS-facing field definition: name, Arrow data type (debug form, e.g.
 /// "Int64", "Utf8"), and nullability.
 #[derive(Debug, Clone, Serialize, Deserialize)]

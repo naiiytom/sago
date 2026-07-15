@@ -156,6 +156,7 @@ mod tests {
             mean: Some(5.0),
             min: Some(1.0),
             max: Some(9.0),
+            variance: None,
         };
         assert_eq!(stats.row_count, 10);
         assert_eq!(stats.mean, Some(5.0));

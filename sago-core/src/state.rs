@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::drift::{ColumnStats, calculate_column_stats, extract_numeric_values};
 use crate::schema_codec::{parse_data_type, serialize_data_type};
-use crate::semantic::{SemanticType, infer_semantic_type};
+use crate::semantic::{SemanticType, infer_semantic_type_multi};
 use crate::{DataProvider, Result, SagoError};
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
@@ -101,11 +101,37 @@ impl ProjectState {
         Ok(state)
     }
 
+    /// Persist this state to `path`, merging with whatever is currently on
+    /// disk under an advisory lock.
+    ///
+    /// A plain load-modify-save cycle races across processes: two concurrent
+    /// `sago apply` invocations targeting different snapshots each load their
+    /// own in-memory copy, insert only the target(s) they're applying, and
+    /// whichever `save()` runs last would otherwise overwrite the file with
+    /// its own copy — silently dropping the other process's snapshot update
+    /// (or any snapshot that existed before either process started, if it
+    /// wasn't in either process's in-memory copy). Locking the read-merge-
+    /// write sequence closes that window: the on-disk file always ends up
+    /// containing the union of every process's `snapshots`, with the calling
+    /// process's own entries taking precedence for keys it touched.
     pub fn save(&self, path: &Path) -> Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(SagoError::Io)?;
         }
-        let json = serde_json::to_string_pretty(self)?;
+
+        let _lock = FileLock::acquire(&lock_sibling(path))?;
+
+        let mut merged = match std::fs::read(path) {
+            Ok(bytes) => Self::from_slice(&bytes).unwrap_or_else(|_| self.clone()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => self.clone(),
+            Err(e) => return Err(SagoError::Io(e)),
+        };
+        merged.schema_version = self.schema_version;
+        for (name, snap) in &self.snapshots {
+            merged.snapshots.insert(name.clone(), snap.clone());
+        }
+
+        let json = serde_json::to_string_pretty(&merged)?;
         // Write to a sibling temp file then atomically rename over the target so
         // an interrupted write (crash, full disk) can never truncate a
         // previously-valid state.json.
@@ -121,6 +147,69 @@ fn tmp_sibling(path: &Path) -> std::path::PathBuf {
     let mut name = path.file_name().unwrap_or_default().to_os_string();
     name.push(".tmp");
     path.with_file_name(name)
+}
+
+/// A lock-file path alongside `path`, distinct from [`tmp_sibling`]'s path so
+/// the two never collide.
+fn lock_sibling(path: &Path) -> std::path::PathBuf {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(".lock");
+    path.with_file_name(name)
+}
+
+/// A simple cross-platform advisory lock built on atomic file creation
+/// (`O_EXCL`-equivalent `create_new`), rather than a platform-specific
+/// `flock`/`LockFileEx` syscall — this keeps `sago-core` free of a new
+/// dependency and works identically on every target this crate builds for.
+/// Held for the duration of [`ProjectState::save`]'s read-merge-write
+/// sequence; released (the lock file removed) on drop.
+struct FileLock {
+    path: std::path::PathBuf,
+}
+
+impl FileLock {
+    /// Retries with a short backoff rather than blocking indefinitely: a
+    /// `sago apply` invocation should fail loudly after a bounded wait if
+    /// another process holds the lock unexpectedly long (e.g. crashed while
+    /// holding it) rather than hang forever.
+    fn acquire(path: &Path) -> Result<Self> {
+        const MAX_ATTEMPTS: u32 = 50;
+        const RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(20);
+
+        for attempt in 0..MAX_ATTEMPTS {
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path)
+            {
+                Ok(_) => {
+                    return Ok(FileLock {
+                        path: path.to_path_buf(),
+                    });
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    if attempt + 1 == MAX_ATTEMPTS {
+                        return Err(SagoError::Io(std::io::Error::new(
+                            std::io::ErrorKind::WouldBlock,
+                            format!(
+                                "timed out waiting for lock file {} (another process may be stuck holding it)",
+                                path.display()
+                            ),
+                        )));
+                    }
+                    std::thread::sleep(RETRY_DELAY);
+                }
+                Err(e) => return Err(SagoError::Io(e)),
+            }
+        }
+        unreachable!("loop always returns before exhausting MAX_ATTEMPTS iterations")
+    }
+}
+
+impl Drop for FileLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
 }
 
 /// Capture a snapshot of `identifier` from `provider`.
@@ -145,12 +234,14 @@ pub async fn capture_snapshot(
         if let Some(stats) = calculate_column_stats(&batches, field.name()) {
             column_stats.insert(field.name().clone(), stats);
         }
-        if let Some(b) = batches.first()
-            && let Some(col) = b.column_by_name(field.name())
-        {
+        let cols: Vec<_> = batches
+            .iter()
+            .filter_map(|b| b.column_by_name(field.name()).cloned())
+            .collect();
+        if !cols.is_empty() {
             semantic_types.insert(
                 field.name().clone(),
-                infer_semantic_type(field.name(), col.as_ref()),
+                infer_semantic_type_multi(field.name(), &cols),
             );
         }
     }
@@ -269,6 +360,7 @@ mod tests {
                 mean: Some(50.0),
                 min: Some(1.0),
                 max: Some(100.0),
+                variance: None,
             },
         );
         let mut semantic_types = HashMap::new();
@@ -348,6 +440,114 @@ mod tests {
         let state = ProjectState::load_or_default(&path).unwrap();
         assert_eq!(state.schema_version, 1);
         assert!(state.snapshots.is_empty());
+    }
+
+    fn snapshot(captured_at: &str) -> TargetSnapshot {
+        TargetSnapshot {
+            captured_at: captured_at.into(),
+            schema: SerializableSchema { fields: vec![] },
+            column_stats: HashMap::new(),
+            semantic_types: HashMap::new(),
+            samples: None,
+        }
+    }
+
+    #[test]
+    fn test_save_merges_with_concurrently_written_disjoint_snapshot() {
+        // Regression: simulates two `sago apply --target <name>` invocations
+        // on different targets racing against the same state.json. Before
+        // save() merged with the on-disk file, whichever call's save() ran
+        // last would clobber the whole file with only its own snapshot(s),
+        // silently losing the other process's update.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+
+        // Process A: loads empty state, applies target "orders", saves.
+        let mut state_a = ProjectState::load_or_default(&path).unwrap();
+        state_a
+            .snapshots
+            .insert("orders".into(), snapshot("2026-01-01T00:00:00Z"));
+        state_a.save(&path).unwrap();
+
+        // Process B: loaded its own (now-stale) empty state *before* A saved,
+        // applies target "invoices" (disjoint from A), saves after A.
+        let mut state_b = ProjectState::empty();
+        state_b
+            .snapshots
+            .insert("invoices".into(), snapshot("2026-01-01T00:00:01Z"));
+        state_b.save(&path).unwrap();
+
+        // Both snapshots must be present — B's save must not have dropped A's.
+        let on_disk = ProjectState::load(&path).unwrap();
+        assert_eq!(on_disk.snapshots.len(), 2, "snapshots: {on_disk:?}");
+        assert!(on_disk.snapshots.contains_key("orders"));
+        assert!(on_disk.snapshots.contains_key("invoices"));
+    }
+
+    #[test]
+    fn test_save_own_snapshot_takes_precedence_over_stale_disk_copy() {
+        // If the same target key is re-applied, the calling process's own
+        // (presumably newer) copy must win over whatever is on disk, not be
+        // silently discarded by the merge.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+
+        let mut older = ProjectState::empty();
+        older
+            .snapshots
+            .insert("orders".into(), snapshot("2026-01-01T00:00:00Z"));
+        older.save(&path).unwrap();
+
+        let mut newer = ProjectState::empty();
+        newer
+            .snapshots
+            .insert("orders".into(), snapshot("2026-01-02T00:00:00Z"));
+        newer.save(&path).unwrap();
+
+        let on_disk = ProjectState::load(&path).unwrap();
+        assert_eq!(on_disk.snapshots.len(), 1);
+        assert_eq!(
+            on_disk.snapshots["orders"].captured_at,
+            "2026-01-02T00:00:00Z"
+        );
+    }
+
+    #[test]
+    fn test_concurrent_saves_from_multiple_threads_lose_no_snapshot() {
+        // A stronger version of the two-process regression test above: N
+        // threads each load a stale empty snapshot of the state, insert
+        // their own disjoint target, and race to save(). Every target must
+        // survive regardless of interleaving.
+        let dir = tempfile::tempdir().unwrap();
+        let path = std::sync::Arc::new(dir.path().join("state.json"));
+        const N: usize = 8;
+
+        let handles: Vec<_> = (0..N)
+            .map(|i| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    let mut state = ProjectState::empty();
+                    state
+                        .snapshots
+                        .insert(format!("target-{i}"), snapshot("2026-01-01T00:00:00Z"));
+                    state.save(&path).unwrap();
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let on_disk = ProjectState::load(&path).unwrap();
+        assert_eq!(
+            on_disk.snapshots.len(),
+            N,
+            "expected all {N} targets, got: {:?}",
+            on_disk.snapshots.keys().collect::<Vec<_>>()
+        );
+        for i in 0..N {
+            assert!(on_disk.snapshots.contains_key(&format!("target-{i}")));
+        }
     }
 
     #[test]
