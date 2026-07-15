@@ -6,7 +6,8 @@ mod commands;
 mod report;
 
 use commands::{
-    apply::ApplyArgs, diff::DiffArgs, federate::FederateArgs, init::InitArgs, plan::PlanArgs,
+    apply::ApplyArgs, diff::DiffArgs, domains::DomainsArgs, federate::FederateArgs, init::InitArgs,
+    plan::PlanArgs,
 };
 
 #[derive(Parser)]
@@ -33,6 +34,8 @@ enum Commands {
     Diff(DiffArgs),
     /// Show drift grouped by data-mesh domain
     Federate(FederateArgs),
+    /// List known data-mesh domains and their registered SagoService endpoints
+    Domains(DomainsArgs),
     /// Launch interactive terminal explorer
     Explore,
 }
@@ -56,6 +59,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         Commands::Diff(a) => commands::diff::run(a).await.map(|()| ExitCode::SUCCESS),
         // Like `plan`, `federate` exits non-zero on a drift-threshold breach.
         Commands::Federate(a) => commands::federate::run(a).await,
+        Commands::Domains(a) => commands::domains::run(a).await.map(|()| ExitCode::SUCCESS),
         Commands::Explore => {
             commands::explore::run()?;
             Ok(ExitCode::SUCCESS)

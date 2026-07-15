@@ -30,6 +30,9 @@ Sago's Phase 5 work produced the primitives a decentralized setup needs:
 - **Per-target ownership metadata** (`config::TargetConfig::domain` / `owner`) —
   targets can now declare which **domain** owns them, the minimal config-level
   step toward treating a project as a federation of independently owned targets.
+- **Per-domain governance metadata** (`config::DomainConfig::operators` /
+  `endpoint`) — a `[domains.<name>]` entry declares who may `apply` a domain's
+  targets and where to reach its `SagoService` node.
 
 ## Target architecture
 
@@ -50,7 +53,7 @@ references them by `domain`, compares schema contracts with the merge engine,
 and verifies data consistency via Merkle roots exchanged over `SagoService` —
 no central data warehouse and no bulk data movement required.
 
-## Concrete next steps (not yet implemented)
+## Concrete next steps
 
 1. ~~A `sago federate` view that groups `plan`/`diff` output by `domain`.~~
    **Done**: `sago federate [--domain <name>]` runs the same baseline-vs-live
@@ -77,9 +80,28 @@ no central data warehouse and no bulk data movement required.
    the `SAGO_ACTOR` environment variable and checks it before touching any
    target in a governed domain — before any connection/provider I/O, so a
    denied target never reaches the network.
-4. A gossip/registry mechanism for domains to discover one another.
+4. ~~A gossip/registry mechanism for domains to discover one another.~~
+   **Done**, as a config-declared registry rather than a live announce
+   protocol: `[domains.<name>].endpoint` in `Sago.toml` records the
+   `SagoService` address a domain's team operates. The registry *is* the
+   config file — distributed however the team already manages it (git,
+   config management, etc.) — not a network protocol between running nodes,
+   which kept this incremental rather than introducing peer state, TTLs, or
+   failure handling for a project of Sago's current scope. `sago-core::registry`
+   turns the table into a queryable list (`list_domains`) and a single lookup
+   (`resolve_endpoint`, which distinguishes "unknown domain" from "known
+   domain, no endpoint configured"). `sago domains` lists every domain a
+   project knows about — the union of `[domains]` entries and every target's
+   `domain =` reference — with its endpoint, operator count, and target
+   count; `sago domains --resolve <name>` prints just the endpoint for
+   scripting (e.g. piping into `sago_sdk::grpc::reconcile`'s connect step).
 
-These are deliberately left as follow-ups: each is a feature in its own right,
-and shipping them speculatively before there is a consumer would be premature.
-The architecture above and the primitives already in `sago-core` make them
-incremental rather than foundational.
+All four follow-ups above are now shipped. This composes every primitive
+listed in "What already exists" into the consumer-facing surface: `sago
+federate` groups by domain, `sago domains` discovers them and their
+endpoints, `sago_sdk::grpc::reconcile` verifies consistency against them, and
+`sago-core::rbac` gates who may `apply` their targets. A live
+gossip/heartbeat protocol, cross-domain schema-merge automation, and
+richer RBAC (roles, inheritance) remain open — genuinely separate features
+to take up only once there is a concrete consumer, not something to build
+speculatively ahead of one.

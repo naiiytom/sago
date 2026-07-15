@@ -49,6 +49,7 @@ pub mod drift;
 pub mod merge;
 pub mod merkle;
 pub mod rbac;
+pub mod registry;
 pub mod rename;
 pub mod schema_codec;
 pub mod semantic;
