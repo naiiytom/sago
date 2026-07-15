@@ -27,13 +27,6 @@ use sha2::{Digest, Sha256};
 
 use crate::Result;
 
-/// Separates canonically-formatted column values within a row before hashing.
-/// The Unicode "unit separator" control character is vanishingly unlikely to
-/// appear in real column data, so two differently-shaped rows do not collide
-/// onto the same leaf bytes just because a value happens to contain a comma or
-/// pipe.
-const FIELD_SEP: char = '\u{1f}';
-
 /// A 32-byte SHA-256 digest.
 pub type Hash = [u8; 32];
 
@@ -141,18 +134,30 @@ impl MerkleTree {
     /// Build a tree over the rows of `batches`, in order, one leaf per row.
     ///
     /// Each row is canonically serialized as its column values (in schema
-    /// order) rendered via Arrow's display formatting and joined with a
-    /// control-character separator — the same value a person would see in
-    /// `sago explore`, not a type-specific byte encoding. This means the
-    /// commitment is over *displayed* values: two datasets that print
-    /// identically hash identically, even if the underlying column types
-    /// differ (e.g. `Int32` vs `Int64`), matching how the rest of Sago treats
-    /// value-level equality. Row order matters — reordering a dataset changes
-    /// the root — since a data-mesh consumer needs to know if rows were
-    /// reshuffled, not only whether the row *set* changed.
+    /// order) rendered via Arrow's display formatting — the same value a
+    /// person would see in `sago explore`, not a type-specific byte encoding.
+    /// This means the commitment is over *displayed* values: two datasets
+    /// that print identically hash identically, even if the underlying
+    /// column types differ (e.g. `Int32` vs `Int64`), matching how the rest
+    /// of Sago treats value-level equality. Row order matters — reordering a
+    /// dataset changes the root — since a data-mesh consumer needs to know if
+    /// rows were reshuffled, not only whether the row *set* changed.
+    ///
+    /// Fields are encoded with an explicit little-endian `u32` length prefix
+    /// rather than joined with a separator character: a separator can appear
+    /// inside a formatted value (control characters are valid Utf8/Binary
+    /// column data), letting two structurally different rows serialize to
+    /// the same byte string and collide onto the same leaf hash. A length
+    /// prefix fixes each field's boundary unambiguously regardless of its
+    /// contents.
     pub fn from_batches(batches: &[RecordBatch]) -> Result<Self> {
         let opts = arrow::util::display::FormatOptions::default();
         let mut leaves = Vec::new();
+        // Reused across every row (cleared, not reallocated) to avoid an
+        // allocation per row on top of the one this benchmarked hot path
+        // already pays for `hash_leaf`'s internal digest.
+        let mut buf = String::new();
+        let mut row_bytes: Vec<u8> = Vec::new();
         for batch in batches {
             let formatters: Vec<ArrayFormatter<'_>> = batch
                 .columns()
@@ -160,14 +165,14 @@ impl MerkleTree {
                 .map(|col| ArrayFormatter::try_new(col.as_ref(), &opts))
                 .collect::<std::result::Result<_, _>>()?;
             for row in 0..batch.num_rows() {
-                let mut buf = String::new();
-                for (i, f) in formatters.iter().enumerate() {
-                    if i > 0 {
-                        buf.push(FIELD_SEP);
-                    }
+                row_bytes.clear();
+                for f in &formatters {
+                    buf.clear();
                     write!(buf, "{}", f.value(row)).expect("String write is infallible");
+                    row_bytes.extend_from_slice(&(buf.len() as u32).to_le_bytes());
+                    row_bytes.extend_from_slice(buf.as_bytes());
                 }
-                leaves.push(hash_leaf(buf.as_bytes()));
+                leaves.push(hash_leaf(&row_bytes));
             }
         }
         Ok(Self::from_leaves(leaves))
@@ -528,5 +533,48 @@ mod tests {
         let with_value = MerkleTree::from_batches(&[b]).unwrap();
         let with_null = MerkleTree::from_batches(&[null_batch]).unwrap();
         assert_ne!(with_value.root(), with_null.root());
+    }
+
+    #[test]
+    fn test_from_batches_field_boundary_collision_is_prevented() {
+        // Regression: with a bare-separator field encoding, a value
+        // containing the separator byte could shift the field boundary and
+        // make two structurally different rows serialize to identical bytes.
+        // Row A: name="Alice\u{1f}", note="Bob"
+        // Row B: name="Alice",       note="\u{1f}Bob"
+        // Both used to format to "Alice\u{1f}\u{1f}Bob" under naive
+        // separator-joining. The length-prefixed encoding must distinguish
+        // them.
+        use arrow::array::StringArray;
+        use arrow::datatypes::{DataType, Field, Schema};
+        let schema = std::sync::Arc::new(Schema::new(vec![
+            Field::new("name", DataType::Utf8, true),
+            Field::new("note", DataType::Utf8, true),
+        ]));
+
+        let row_a = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                std::sync::Arc::new(StringArray::from(vec!["Alice\u{1f}"])),
+                std::sync::Arc::new(StringArray::from(vec!["Bob"])),
+            ],
+        )
+        .unwrap();
+        let row_b = RecordBatch::try_new(
+            schema,
+            vec![
+                std::sync::Arc::new(StringArray::from(vec!["Alice"])),
+                std::sync::Arc::new(StringArray::from(vec!["\u{1f}Bob"])),
+            ],
+        )
+        .unwrap();
+
+        let tree_a = MerkleTree::from_batches(&[row_a]).unwrap();
+        let tree_b = MerkleTree::from_batches(&[row_b]).unwrap();
+        assert_ne!(
+            tree_a.root(),
+            tree_b.root(),
+            "structurally different rows must not collide onto the same leaf"
+        );
     }
 }
